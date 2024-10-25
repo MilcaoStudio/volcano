@@ -1,0 +1,31 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# Async
+async-trait = "0.1.83"
+futures = "0.3.31"
+tokio = { version = "1.37.0", features = ["full"] }
+tokio-tungstenite = "0.21.0"
+
+# Logging
+log = "0.4.21"
+pretty_env_logger = "0.5.0"
+
+# Error
+thiserror = "1.0.58"
+
+# Serde
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.115"
+
+# WebRTC
+webrtc = "0.11.0"
+
+anyhow = "1.0.82"
+postage = "0.5.0"
+volcano-sfu = {path = "../volcano-sfu"}

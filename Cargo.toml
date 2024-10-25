@@ -1,0 +1,3 @@
+[workspace]
+members = ["volcano-sfu", "server"]
+resolver = "2"
