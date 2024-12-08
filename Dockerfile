@@ -1,5 +1,5 @@
 # Build
-FROM rust:slim-bookworm as build
+FROM rust:slim-bookworm AS build
 USER 0:0
 WORKDIR /home/rust
 
@@ -17,7 +17,7 @@ COPY server ./server
 
 # Build
 RUN cargo build --locked --release
-RUN cargo install --locked server
+RUN cargo install --path server
 RUN rm */src/*.rs target/release/deps/volcano*
 
 # Bundle
@@ -31,6 +31,6 @@ EXPOSE 4000/tcp
 #TURN server port
 EXPOSE 3478/udp
 
-ENV RUST_LOG debug
+ENV RUST_LOG=debug
 
 CMD ["./volcano-server"]
