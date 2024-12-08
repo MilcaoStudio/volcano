@@ -391,7 +391,6 @@ impl LocalRouter {
               data = rtcp_receiver.recv() => {
                  if let Some(val) = data{
                     if let Some(f) = &mut *self.rtcp_writer_handler.lock().await {
-                        info!("Calling rtcp_writer_handler");
                         let _ = f(val).await;
                     }
                 }

@@ -233,7 +233,6 @@ impl Publisher {
         let pc_clone_out = self.pc.clone();
         self.router.set_rtcp_writer(Box::new(
             move |packets: Vec<Box<dyn RtcpPacket + Send + Sync>>| {
-                info!("Writing rtcp packet on publisher");
                 let pc_clone_in = pc_clone_out.clone();
                 Box::pin(async move {
                     pc_clone_in.write_rtcp(&packets[..]).await?;
