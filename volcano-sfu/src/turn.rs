@@ -54,11 +54,11 @@ impl AuthHandler for CustomAuthHandler {
         realm: &str,
         _src_addr: SocketAddr,
     ) -> Result<Vec<u8>, Error> {
+        debug!("realm val: {}", realm);
         if let Some(val) = self.users_map.get(&username.to_string()) {
             return Ok(val.clone());
         }
-        trace!("realm val: {}", realm);
-
+        
         Err(Error::ErrNilConn)
     }
 }
@@ -79,13 +79,13 @@ pub async fn init_turn_server(
             let mut users_map: HashMap<String, Vec<u8>> = HashMap::new();
             let re = regex::Regex::new(r"(\w+)=(\w+)").unwrap();
 
-            for caps in re.captures_iter(conf.realm.clone().as_str()) {
+            for caps in re.captures_iter(&conf.auth.credentials) {
                 let username = caps.get(1).unwrap().as_str();
                 let username_string = username.to_string();
                 let password = caps.get(2).unwrap().as_str();
                 users_map.insert(
                     username_string,
-                    auth::generate_auth_key(username, conf.realm.clone().as_str(), password),
+                    auth::generate_auth_key(username, &conf.realm, password),
                 );
             }
 
