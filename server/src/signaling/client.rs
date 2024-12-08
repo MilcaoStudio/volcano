@@ -143,7 +143,7 @@ impl Client {
 
     /// Handle incoming packet
     async fn handle_message(&mut self, packet: PacketC2S, write: &Sender) -> Result<()> {
-        debug!("C->S: {:?}", packet);
+        info!("C->S: {:?}", packet);
 
         let peer = self.peer.clone();
         match packet {
@@ -155,13 +155,14 @@ impl Client {
                 Ok(())
             }
             PacketC2S::Join {
+                id,
                 room_id,
                 offer,
                 cfg,
             } => {
                 let room = Room::get(&room_id);
                 self.room = Some(room.clone());
-                self.handle_join(write, room.clone(), offer, cfg).await
+                self.handle_join(write, room.clone(), offer, cfg, id).await
             }
             PacketC2S::Leave => {
                 match &self.room {
@@ -180,8 +181,8 @@ impl Client {
                 }
             }
             PacketC2S::Remove { removed_tracks: _ } => Ok(()),
-            PacketC2S::Offer { description } => {
-                Self::handle_offer(peer, write.clone(), description).await
+            PacketC2S::Offer {id, description } => {
+                Self::handle_offer(peer, write.clone(), description, id).await
             }
             PacketC2S::Trickle { candidate, target } => {
                 info!("Incoming tricke for {target}");
@@ -196,6 +197,7 @@ impl Client {
         room: Arc<Room>,
         initial_offer: RTCSessionDescription,
         cfg: JoinConfig,
+        id: u32,
     ) -> Result<()> {
 
         room.subscribe_signal(self.signal.clone()).await;
@@ -234,13 +236,18 @@ impl Client {
 
         match peer.answer(initial_offer).await {
             Ok(answer) => {
+                // Sends back request id
                 write
                     .send(PacketS2C::Answer {
+                        id,
                         description: answer,
                     })
                     .await?;
+                info!("Answer sent to client, user: {}", self.user.id);
             }
             Err(err) => {
+                // Client should know error
+                write.send(PacketS2C::Error { error: err.to_string() }).await?;
                 error!("answer error: {}", err);
             }
         };
@@ -251,11 +258,13 @@ impl Client {
         peer: Arc<Peer>,
         write: Sender,
         offer: RTCSessionDescription,
+        id: u32,
     ) -> Result<()> {
         match peer.answer(offer).await {
             Ok(answer) => {
                 write
                     .send(PacketS2C::Answer {
+                        id,
                         description: answer,
                     })
                     .await

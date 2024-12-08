@@ -449,9 +449,7 @@ impl AtomicBuffer {
             "video/h264" => {
                 ep.key_frame = is_h264_keyframe(&packet.payload[..]);
             }
-            _ => {
-                info!("Unknown buffer mime");
-            }
+            _ => {}
         }
 
         if buffer.min_packet_probe < 25 {

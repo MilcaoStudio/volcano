@@ -1,8 +1,14 @@
 use anyhow::Result;
 use futures::{Future, StreamExt};
-use volcano_sfu::{rtc::{config::{self, WebRTCTransportConfig}, room::Room}, turn};
 use std::{fs, pin::Pin, sync::Arc};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use volcano_sfu::{
+    rtc::{
+        config::{self, WebRTCTransportConfig},
+        room::Room,
+    },
+    turn,
+};
 
 use super::{
     client::Client,
@@ -41,7 +47,9 @@ pub async fn launch<A: ToSocketAddrs>(addr: A, auth: AuthFn) -> Result<()> {
     info!("Server listening on {}", listener.local_addr().unwrap());
 
     let content = fs::read_to_string("./config.toml")?;
-    let c = config::load(&content).inspect_err(|e| error!("Error loading config: {e}. Loading default config.")).unwrap_or_default();
+    let c = config::load(&content)
+        .inspect_err(|e| error!("Error loading config: {e}. Loading default config."))
+        .unwrap_or_default();
     let config = c.clone();
     if c.turn.enabled {
         turn::init_turn_server(c.turn, c.turn_auth).await?;
@@ -50,7 +58,11 @@ pub async fn launch<A: ToSocketAddrs>(addr: A, auth: AuthFn) -> Result<()> {
     // Accept new connections
     let auth = Arc::new(auth);
     while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(accept_connection(stream, auth.clone(), Arc::clone(&webrtc_config)));
+        tokio::spawn(accept_connection(
+            stream,
+            auth.clone(),
+            Arc::clone(&webrtc_config),
+        ));
     }
 
     Ok(())
@@ -84,13 +96,21 @@ async fn accept_connection(stream: TcpStream, auth: Arc<AuthFn>, w: Arc<WebRTCTr
 }
 
 /// Wrap error handling around the connection and authenticate the client
-async fn handle_connection((mut read, write): ReadWritePair, auth: Arc<AuthFn>, w: Arc<WebRTCTransportConfig>) -> Result<()> {
+async fn handle_connection(
+    (mut read, write): ReadWritePair,
+    auth: Arc<AuthFn>,
+    w: Arc<WebRTCTransportConfig>,
+) -> Result<()> {
     // Wait until valid packet is sent
     let mut client: Option<Client> = None;
     while let Some(msg) = read.next().await {
         if let Some(packet) = PacketC2S::from(msg?)? {
             match packet {
-                PacketC2S::Connect { token, room_ids } => {
+                PacketC2S::Connect {
+                    id,
+                    token,
+                    room_ids,
+                } => {
                     if let Ok(user) = (auth)(token).await {
                         info!("Authenticated user {}", user.id);
 
@@ -101,7 +121,12 @@ async fn handle_connection((mut read, write): ReadWritePair, auth: Arc<AuthFn>, 
                         let available_rooms = Room::fetch_rooms(&room_ids);
 
                         // Send inmediate response
-                        write.send(PacketS2C::Accept { available_rooms }).await?;
+                        write
+                            .send(PacketS2C::Accept {
+                                id,
+                                available_rooms,
+                            })
+                            .await?;
                     }
                     break;
                 }

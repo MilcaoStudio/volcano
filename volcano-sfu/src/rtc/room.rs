@@ -142,7 +142,7 @@ impl Room {
         }));
 
         for peer in self.peers.iter() {
-            if peer.id().await.as_str() == owner || peer.subscriber().await.is_none() {
+            if peer.id().as_str() == owner || peer.subscriber().await.is_none() {
                 continue;
             }
 
@@ -177,8 +177,8 @@ impl Room {
     }
 
     pub async fn add_peer(&self, peer: Arc<Peer>) {
-        let id = peer.id().await;
-        info!("Peer {} added to {}", &id, self.id);
+        let id = peer.id();
+        info!("Peer {} added to room {}", &id, self.id);
         self.peers.insert(id, peer);
     }
 
@@ -361,8 +361,8 @@ impl Room {
         }
 
         for cur_peer in self.peers.iter() {
-            let cur_id = cur_peer.id().await;
-            let peer_id = peer.id().await;
+            let cur_id = cur_peer.id();
+            let peer_id = peer.id();
             let publisher = cur_peer.publisher().await;
             if cur_id == peer_id || publisher.is_none() {
                 continue;
@@ -452,7 +452,7 @@ impl Room {
     ) {
         for peer in self.peers.iter() {
             let subscriber = peer.subscriber().await;
-            let peer_id = peer.id().await;
+            let peer_id = peer.id();
             // no subscriber or same id = no publish
             if router.id() == peer_id || subscriber.is_none() {
                 info!("Same id ({peer_id}) skipped.");
@@ -480,9 +480,12 @@ impl Room {
 
     async fn send_room_event(&self, event: RoomEvent) {
         if let Ok(payload) = serde_json::to_string(&event) {
+            info!("[Room {}] Sending room event: {}", self.id, payload);
             for peer in self.peers.iter() {
                 if let Some(subscriber) = peer.subscriber().await {
                     subscriber.send_message(&payload).await;
+                } else {
+                    warn!("[{}] No subscriber available", peer.id());
                 }
             }
         } else {

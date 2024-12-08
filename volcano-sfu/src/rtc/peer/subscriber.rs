@@ -65,6 +65,7 @@ impl Subscriber {
             .pc
             .create_data_channel(label, Some(RTCDataChannelInit::default()))
             .await?;
+        info!("[{}] Created data channel {}", self.id, ndc.label());
         let tracks_out = self.tracks.clone();
 
         let ndc_1 = ndc.clone();

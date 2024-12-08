@@ -56,10 +56,12 @@ pub enum PacketC2S {
     },
     /// Offer (from negotiation)
     Offer {
+        id: u32,
         description: RTCSessionDescription,
     },
     /// Authenticate
     Connect {
+        id: u32,
         /// Authentication token
         token: String,
         /// Rooms available for client
@@ -69,11 +71,13 @@ pub enum PacketC2S {
     },
     /// Tell the server to send tracks
     Continue {
+        id: u32,
         /// IDs of tracks the client wants
         tracks: Vec<String>,
     },
     /// Peer offers a description to a room
     Join {
+        id: u32,
         room_id: String,
         offer: RTCSessionDescription,
         #[serde(default)]
@@ -99,10 +103,12 @@ pub enum PacketC2S {
 pub enum PacketS2C {
     /// Accept authentication
     Accept {
+        id: u32,
         available_rooms: Vec<RoomInfo>
     },
     /// Answer (for client publisher)
     Answer {
+        id: u32,
         description: RTCSessionDescription,
     },
     /// Tell the client certain tracks are no longer available
