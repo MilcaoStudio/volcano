@@ -65,15 +65,21 @@ impl Subscriber {
             .pc
             .create_data_channel(label, Some(RTCDataChannelInit::default()))
             .await?;
-        info!("[{}] Created data channel {}", self.id, ndc.label());
+        info!("[{}] Created data channel `{}` (awaiting for offer)", self.id, ndc.label());
         let tracks_out = self.tracks.clone();
 
         let ndc_1 = ndc.clone();
+        let ndc_2 = ndc.clone();
+        ndc.on_open(Box::new(move || {
+            Box::pin(async move {
+                let _ = ndc_1.send_text("{\"message\": \"Client should receive this message\"}").await;
+            })
+        }));
         ndc.on_message(Box::new(move |msg| {
             let data = String::from_utf8(msg.data.to_vec())
                 .inspect_err(|_| error!("Error parsing message as string"))
                 .unwrap();
-            info!("[{}] Message received: {data}", ndc_1.label());
+            info!("[{}] Message received: {data}", ndc_2.label());
             let read_remote_media = serde_json::from_str::<RemoteMedia>(&data);
             let tracks_in = tracks_out.clone();
             

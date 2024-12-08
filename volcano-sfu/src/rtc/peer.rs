@@ -228,6 +228,8 @@ impl Peer {
                 for dc in &*room.get_data_channel_middlewares() {
                     if let Some(sub) = &*self.subscriber.lock().await {
                         sub.add_data_channel(&dc.config.label).await?;
+                        info!("[Subscriber {}] Trying to offer...", sub.id);
+                        sub.create_offer().await?;
                     }
                 }
             }

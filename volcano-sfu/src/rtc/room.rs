@@ -104,6 +104,7 @@ impl Room {
         let room_out_2 = Arc::clone(&self);
         for lbl in self.labels.iter() {
             if lbl.eq(&label) {
+                info!("[Publisher {} -> Room {}] Data channel `{}` already exists, adding listener", owner, self.id, label);
                 // Adds message listener if user is already registered
                 dc.on_message(Box::new(move |msg: DataChannelMessage| {
                     let room_in = room_out.clone();
@@ -292,6 +293,7 @@ impl Room {
                 info!("Message forwarded to {}: {}", dc.label(), s);
                 dc.send_text(s).await
             } else {
+                info!("Message forwarded to {}: <binary>", dc.label());
                 dc.send(&msg.data).await
             } {
                 error!("publish_message send error:{}", err);
