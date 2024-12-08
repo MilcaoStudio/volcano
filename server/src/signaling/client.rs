@@ -5,16 +5,12 @@ use futures::{
     future::{select, Either}, pin_mut, FutureExt, TryStreamExt
 };
 use postage::stream::Stream;
-use webrtc::{
-    ice_transport::ice_candidate::RTCIceCandidateInit,
-    peer_connection::sdp::session_description::RTCSessionDescription,
-};
-
 use volcano_sfu::rtc::{
     config::WebRTCTransportConfig,
     peer::{JoinConfig, Peer},
     room::{Room, RoomEvent, RoomSignal},
 };
+use webrtc::{ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::sdp::session_description::RTCSessionDescription};
 
 use super::{
     packets::{PacketC2S, PacketS2C, ServerError},

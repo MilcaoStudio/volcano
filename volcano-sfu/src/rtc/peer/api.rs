@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use sdp::extmap;
 use webrtc::{
     api::{
         interceptor_registry::register_default_interceptors, media_engine::MediaEngine, APIBuilder,
     }, error::Result, interceptor::registry::Registry, peer_connection::{configuration::RTCConfiguration, RTCPeerConnection}, rtp_transceiver::{
         rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTCRtpHeaderExtensionCapability, RTPCodecType},
         RTCPFeedback,
-    }
+    }, sdp::extmap
 };
 
 use crate::rtc::config::WebRTCTransportConfig;

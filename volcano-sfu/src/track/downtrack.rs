@@ -59,6 +59,7 @@ pub struct DownTrackInfo {
 
 pub struct DownTrackInternal {
     pub id: String,
+    pub rid: String,
     pub bound: AtomicBool,
     pub mime: Mutex<String>,
     pub ssrc: Mutex<u32>,
@@ -94,6 +95,7 @@ impl DownTrackInternal {
         Self {
             codec: c,
             id: r.track_id(),
+            rid: r.track_rid(),
             bound: AtomicBool::default(),
             mime: Mutex::default(),
             ssrc: Mutex::default(),
@@ -318,6 +320,10 @@ impl TrackLocal for DownTrackInternal {
         }
 
         RTPCodecType::Unspecified
+    }
+
+    fn rid(&self) -> Option<&str> {
+        Some(&self.rid)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -855,6 +861,10 @@ impl TrackLocal for DownTrack {
         self.down_track_local.id()
     }
 
+    fn rid(&self) -> Option<&str> {
+        self.down_track_local.rid()
+    }
+    
     fn stream_id(&self) -> &str {
         self.down_track_local.stream_id()
     }

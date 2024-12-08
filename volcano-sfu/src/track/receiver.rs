@@ -36,6 +36,7 @@ pub type OnCloseHandlerFn =
 pub trait Receiver: Send + Sync {
     fn track_id(&self) -> String;
     fn stream_id(&self) -> String;
+    fn track_rid(&self) -> String;
     fn codec(&self) -> RTCRtpCodecParameters;
     fn kind(&self) -> RTPCodecType;
     async fn ssrc(&self, layer: usize) -> u32;
@@ -68,6 +69,7 @@ pub struct WebRTCReceiver {
     #[allow(dead_code)]
     peer_id: String,
     track_id: String,
+    track_rid: String,
     stream_id: String,
     kind: RTPCodecType,
     closed: AtomicBool,
@@ -96,6 +98,7 @@ impl WebRTCReceiver {
             peer_id: pid,
             receiver,
             track_id: track.id(),
+            track_rid: track.rid().to_owned(),
             stream_id: track.stream_id(),
             codec: track.codec(),
             kind: track.kind(),
@@ -127,6 +130,9 @@ impl Receiver for WebRTCReceiver {
     }
     fn track_id(&self) -> String {
         self.track_id.clone()
+    }
+    fn track_rid(&self) -> String {
+        self.track_rid.clone()
     }
     fn codec(&self) -> RTCRtpCodecParameters {
         self.codec.clone()

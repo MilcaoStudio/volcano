@@ -11,12 +11,10 @@ use std::{
 use tokio::sync::Mutex;
 use webrtc::{
     ice_transport::{
-        ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
-        ice_connection_state::RTCIceConnectionState,
+        ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}, ice_connection_state::RTCIceConnectionState
     },
     peer_connection::{
-        configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
-        signaling_state::RTCSignalingState, RTCPeerConnection,
+        configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState, RTCPeerConnection
     },
 };
 

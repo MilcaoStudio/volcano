@@ -1,11 +1,8 @@
 use thiserror::Error;
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::{
-    ice_transport::ice_candidate::RTCIceCandidateInit,
-    peer_connection::sdp::session_description::RTCSessionDescription,
-};
 
 use volcano_sfu::rtc::{peer::JoinConfig, room::RoomInfo};
+use webrtc::{ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::sdp::session_description::RTCSessionDescription};
 
 /// Available types of media tracks
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]

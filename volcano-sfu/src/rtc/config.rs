@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::{net::UdpSocket, sync::Mutex};
-use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_credential_type::RTCIceCredentialType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}, turn::auth::AuthHandler,};
+use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}, turn::auth::AuthHandler,};
 use anyhow::Result;
 
 use crate::turn::{self, TurnConfig};
@@ -143,7 +143,6 @@ impl WebRTCTransportConfig {
                         urls: ice_server.urls.clone(),
                         username: ice_server.user_name.clone(),
                         credential: ice_server.credential.clone(),
-                        credential_type: RTCIceCredentialType::Unspecified,
                     };
 
                     ice_servers.push(s);
