@@ -170,6 +170,8 @@ pub enum ServerError {
     NotConnected,
     #[error("Media type already has an existing track!")]
     MediaTypeSatisfied,
+    #[error("Request cannot be parsed.")]
+    NotDeserializable,
     #[error("Request type is unknown.")]
     UnknownRequest,
 }
@@ -187,13 +189,19 @@ impl std::fmt::Display for MediaType {
 
 impl PacketC2S {
     /// Create a packet from incoming Message
-    pub fn from(message: Message) -> anyhow::Result<Option<Self>> {
-        Ok(if let Message::Text(text) = message {
-            debug!("Parsing {}", text);
-            Some(serde_json::from_str(&text)?)
+    pub fn from(message: Message) -> Result<Self, ServerError> {
+        if let Message::Text(text) = message {
+            match serde_json::from_str(&text) {
+                Ok(packet) => Ok(packet),
+                Err(e) => {
+                    error!("Error: {e}");
+                    error!("Tried to parse packet: {text}");
+                    Err(ServerError::UnknownRequest)
+                }
+            }
         } else {
-            None
-        })
+            Err(ServerError::NotDeserializable)
+        }
     }
 }
 

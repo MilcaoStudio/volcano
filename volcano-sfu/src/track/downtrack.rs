@@ -557,7 +557,7 @@ impl DownTrack {
                             self.max_spatial_layer
                                 .store(target_layer, Ordering::Relaxed);
                         }
-                        info!("Spatial layer set as {target_layer}");
+                        debug!("[Track {}] Switch to spatial layer: {target_layer} (max={set_as_max})", self.id());
                     }
                     Err(err) => {
                         error!("switch_down_track err: {}", err);
@@ -566,7 +566,7 @@ impl DownTrack {
                 return Ok(());
             }
             _ => {
-                info!("other downtracks");
+                debug!("switch_spatial_layer Simple track cannot switch layer");
             }
         }
 
@@ -593,16 +593,15 @@ impl DownTrack {
                     Ordering::Relaxed,
                 );
 
-                info!("temporal layer set as {target_layer}");
                 if set_as_max {
                     self.max_temporal_layer
                         .store(target_layer, Ordering::Relaxed);
-                    info!("max temporal layer set as {target_layer}");
                 }
+                info!("[Track {}] Temporal layer: {target_layer} (max={set_as_max})", self.id());
             }
 
             _ => {
-                info!("switch_temporal_layer other DownTrackType");
+                info!("switch_temporal_layer Simple track cannot switch layer");
             }
         }
     }
@@ -715,8 +714,7 @@ impl DownTrack {
 
         let write_stream_val = self.down_track_local.write_stream.lock().await;
         if let Some(write_stream) = &*write_stream_val {
-            let size = write_stream.write_rtp(&ext_packet.packet).await?;
-            debug!("write_simple_rtp size:..{}", size);
+            write_stream.write_rtp(&ext_packet.packet).await?;
         }
 
         Ok(())
@@ -848,12 +846,12 @@ impl PartialEq for DownTrack {
 #[async_trait]
 impl TrackLocal for DownTrack {
     async fn bind(&self, t: &TrackLocalContext) -> RTCResult<RTCRtpCodecParameters> {
-        info!("TrackLocal bind.......");
+        info!("[Track {}] Track bind", self.id());
         self.down_track_local.bind(t).await
     }
 
     async fn unbind(&self, t: &TrackLocalContext) -> RTCResult<()> {
-        info!("TrackLocal unbind.......");
+        info!("[Track {}] Track bind", self.id());
         self.down_track_local.unbind(t).await
     }
 

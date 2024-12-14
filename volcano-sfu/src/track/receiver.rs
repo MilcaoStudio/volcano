@@ -226,6 +226,7 @@ impl Receiver for WebRTCReceiver {
         }
         let mut layer = 0;
 
+        let track_id = track.id();
         if self.is_simulcast {
             for (idx, v) in self.available.lock().await.iter().enumerate() {
                 if v.load(Ordering::Relaxed) {
@@ -236,7 +237,7 @@ impl Receiver for WebRTCReceiver {
                 }
             }
             if self.down_track_subscribed(layer, track.clone()).await {
-                info!("WebRTCReceiver::add_down_track Track already subscribed");
+                debug!("Track {} already subscribed", track_id);
                 return;
             }
             track.set_initial_layers(layer as i32, 2);
@@ -246,28 +247,31 @@ impl Receiver for WebRTCReceiver {
             track
                 .set_track_type(DownTrackType::SimulcastDownTrack)
                 .await;
-            info!("WebRTCReceiver::add_down_track Simulcast track done");
+            info!("[WebRTCReceiver::add_down_track] Add simulcast track {}", track_id);
         } else {
             if self.down_track_subscribed(layer, track.clone()).await {
-                info!("WebRTCReceiver::add_down_track Track already subscribed");
+                debug!("Track {} already subscribed", track_id);
                 return;
             }
 
             track.set_initial_layers(0, 0);
             track.set_track_type(DownTrackType::SimpleDownTrack).await;
-            info!("WebRTCReceiver::add_down_track Simple track done");
+            info!("WebRTCReceiver::add_down_track Add simple track {}", track_id);
         }
 
         self.store_down_track(layer, track).await
     }
     async fn switch_down_track(&self, track: Arc<DownTrack>, layer: usize) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) {
+            error!("Receiver is closed");
             return Err(Error::ErrNoReceiverFound);
         }
 
         if self.available.lock().await[layer].load(Ordering::Relaxed) {
+            info!("[Down track {}] Marked as pending", track.id());
             self.pending[layer].store(true, Ordering::Relaxed);
             self.pending_tracks[layer].lock().await.push(track);
+            return Ok(());
         }
         Err(Error::ErrNoReceiverFound)
     }
@@ -478,7 +482,9 @@ impl Receiver for WebRTCReceiver {
                                                 delete_down_track_params
                                                     .push((layer, dt.id().clone()));
                                             }
-                                            _ => {}
+                                            _ => {
+                                                error!("down track unknown write error {}, layer {}", e, layer);
+                                            }
                                         }
                                     }
                                 }

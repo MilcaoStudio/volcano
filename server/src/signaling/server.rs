@@ -104,8 +104,8 @@ async fn handle_connection(
     // Wait until valid packet is sent
     let mut client: Option<Client> = None;
     while let Some(msg) = read.next().await {
-        if let Some(packet) = PacketC2S::from(msg?)? {
-            match packet {
+        match PacketC2S::from(msg?) {
+            Ok(packet) => match packet {
                 PacketC2S::Connect {
                     id,
                     token,
@@ -131,6 +131,9 @@ async fn handle_connection(
                     break;
                 }
                 _ => {}
+            },
+            Err(e) => {
+                error!("Error: {e}");
             }
         }
     }
