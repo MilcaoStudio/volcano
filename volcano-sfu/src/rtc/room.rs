@@ -15,8 +15,7 @@ use webrtc::{
     data_channel::{
         data_channel_message::DataChannelMessage, data_channel_state::RTCDataChannelState,
         RTCDataChannel,
-    },
-    track::track_local::{track_local_static_rtp::TrackLocalStaticRTP, TrackLocal},
+    }, track::track_local::{TrackLocal, track_local_static_rtp::TrackLocalStaticRTP},
 };
 
 use crate::track::{audio_observer::AudioObserver, router::LocalRouter};
@@ -177,15 +176,37 @@ impl Room {
         }
     }
 
-    pub async fn add_peer(&self, peer: Arc<Peer>) {
-        let id = peer.id();
-        info!("Peer {} added to room {}", &id, self.id);
-        self.peers.insert(id, peer);
+    pub(crate) async fn add_api_channel(self: &Arc<Self>, id: &str) {
+        if let Some(peer) = self.get_peer(id).await {
+            let room_out = self.clone();
+            let user_id_out = id.to_owned();
+            if peer.subscriber().await.is_none() {
+                error!("add_api_channel No subscriber available");
+                return;
+            }
+            let subscriber = peer.subscriber().await.unwrap();
+            let user_tracks = self.user_tracks.get(id).map(|tracks| tracks.clone());
+            subscriber.api_channel().on_open(Box::new( move || {
+                let room_in = room_out.clone();
+                let user_id_in = user_id_out.clone();
+                let tracks_in = user_tracks.unwrap_or_default();
+                Box::pin(async move {
+                    room_in.join_user(user_id_in, tracks_in).await
+                })
+            }));
+            let room_id = self.id.clone();
+            info!("[Room {room_id}] Data channel negotiation");
+            if let Err(err) = subscriber.negotiate().await {
+                error!("[Room {room_id}] negotiate error: {}", err);
+            } else {
+                info!("[Room {room_id}] Data channel negotiation successful");
+            }
+        }
     }
 
-    pub async fn subscribe_signal(&self, signal: Arc<RoomSignal>) {
-        info!("Signaler {} subscribed to room {}", signal.id, self.id);
-        self.signalers.lock().await.push(signal);
+    pub async fn add_peer(&self, peer: Arc<Peer>) {
+        let id = peer.id();
+        self.peers.insert(id, peer);
     }
 
     pub async fn unsubscribe_signal(&self, id: &str) {
@@ -196,10 +217,6 @@ impl Room {
         self.closed.store(true, Ordering::Relaxed);
         self.publish(RoomEvent::Close(self.id.clone())).await;
         self.signalers.lock().await.clear();
-        //let mut close_handler = self.on_close_handler.lock().await;
-        //if let Some(f) = &mut *close_handler {
-        //    f().await;
-        //}
     }
 
     /// Get or create a Room by its ID
@@ -267,8 +284,6 @@ impl Room {
 
     /// Publish an event to the room
     pub async fn publish(&self, event: RoomEvent) {
-        info!("Room {} emitted {:?}", self.id, event);
-        //self.sender.clone().try_send(event).ok();
         for signal in &*self.signalers.lock().await {
             signal.publish(&self.id, event.clone());
         }
@@ -440,11 +455,7 @@ impl Room {
     pub async fn remove_track(&self, id: String) {
         self.close_track(&id);
 
-        self.publish(RoomEvent::RemoveTrack {
-            room: self.id.clone(),
-            removed_tracks: vec![id],
-        })
-        .await;
+        self.send_room_event(RoomEvent::RemoveTrack { removed_tracks: vec![id], room: self.id.clone() }).await;
     }
 
     pub async fn publish_track(

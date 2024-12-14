@@ -33,6 +33,7 @@ pub struct Subscriber {
     pub pc: Arc<RTCPeerConnection>,
     pub m: Arc<Mutex<MediaEngine>>,
 
+    api_channel: Arc<RTCDataChannel>,
     tracks: Arc<Mutex<HashMap<String, Vec<Arc<DownTrack>>>>>,
     channels: Arc<Mutex<HashMap<String, Arc<RTCDataChannel>>>>,
     candidates: Arc<Mutex<Vec<RTCIceCandidateInit>>>,
@@ -46,7 +47,11 @@ pub type OnNegotiateFn =
 impl Subscriber {
     pub async fn new(id: String, c: Arc<WebRTCTransportConfig>) -> Result<Self> {
         let pc = api::create_subscriber_connection(c).await?;
+        let api_channel = pc.create_data_channel(API_CHANNEL_LABEL, Some(RTCDataChannelInit::default())).await?;
+        info!("[Subscriber {id}] Created data channel `{API_CHANNEL_LABEL}` (awaiting for offer)");
+
         let subscriber = Subscriber {
+            api_channel,
             id,
             pc,
             m: Default::default(),
@@ -104,11 +109,10 @@ impl Subscriber {
         Ok(())
     }
 
-    pub async fn close(&self) -> Result<()> {
+    pub async fn close(&self) {
         if let Err(err) = self.pc.close().await {
             error!("subscriber peer close error: {err}");
         };
-        Ok(())
     }
 
     pub async fn create_data_channel(&self, label: String) -> Result<Arc<RTCDataChannel>> {
@@ -152,6 +156,10 @@ impl Subscriber {
         info!("subscriber::add_ice_candidate add candidate into candidates vector");
         self.candidates.lock().await.push(candidate);
         Ok(())
+    }
+
+    pub fn api_channel(&self) -> Arc<RTCDataChannel> {
+        self.api_channel.clone()
     }
 
     pub async fn register_data_channel(&self, label: String, dc: Arc<RTCDataChannel>) {
@@ -211,10 +219,8 @@ impl Subscriber {
     }
 
     pub async fn send_message(&self, content: &str) {
-        for dc in self.channels.lock().await.values() {
-            if let Err(e) = dc.send_text(content).await {
-                error!("Send message error: {e}");
-            };
+        if let Err(e) = self.api_channel.send_text(content).await {
+            error!("Send message error: {e}");
         }
     }
 

@@ -203,8 +203,10 @@ impl Publisher {
             let id_in = peer_id_out_2.clone();
             // Ignore our default channel, exists to force ICE candidates. See signalPair for more info
             if channel.label() == super::subscriber::API_CHANNEL_LABEL {
-                info!("Skipping API data channel");
-                return Box::pin(async {});
+                info!("[Publisher {id_in}] API data channel published from client!");
+                return Box::pin(async move {
+                    room_in.add_api_channel(&id_in).await;
+                });
             }
             Box::pin(async move {
                 room_in.add_data_channel(&id_in, channel).await;
@@ -217,7 +219,6 @@ impl Publisher {
             let pc_in = pc_out.clone();
             let handler_in = Arc::clone(&on_ice_connection_state_change_clone);
             Box::pin(async move {
-                info!("Calling to local ice_connection_state_change handler");
                 if let Some(h) = &mut *handler_in.lock().await {
                     h(s).await;
                 }
