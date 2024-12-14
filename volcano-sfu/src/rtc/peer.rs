@@ -1,4 +1,5 @@
 use anyhow::Result;
+use subscriber::Subscriber;
 use std::{
     fmt::Debug,
     future::Future,
@@ -14,7 +15,7 @@ use webrtc::{
         ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}, ice_connection_state::RTCIceConnectionState
     },
     peer_connection::{
-        configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState, RTCPeerConnection
+        configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState
     },
 };
 
@@ -23,13 +24,11 @@ use crate::{
     rtc::peer::publisher::Publisher,
 };
 
-use self::{negotiation::NegotiationState, subscriber::Subscriber};
 
 use super::{config::WebRTCTransportConfig, room::Room};
 use crate::track::error::Error;
 
 mod api;
-mod negotiation;
 mod publisher;
 pub mod subscriber;
 
@@ -71,9 +70,7 @@ pub struct Peer {
     pub room: Arc<Mutex<Option<Arc<Room>>>>,
     subscriber: Arc<Mutex<Option<Arc<Subscriber>>>>,
     user_id: String,
-    pc: Arc<RTCPeerConnection>,
     track_map: Arc<Vec<String>>,
-    negotiation_state: Arc<NegotiationState>,
     on_ice_candidate_fn: Arc<Mutex<Option<OnIceCandidateFn>>>,
     on_ice_connection_state_change: Arc<Mutex<Option<OnIceConnectionStateChangeFn>>>,
     on_offer_fn: Arc<Mutex<Option<OnOfferFn>>>,
@@ -85,9 +82,6 @@ pub struct Peer {
 impl Peer {
     /// Create a new Peer
     pub async fn new(user_id: String, config: Arc<WebRTCTransportConfig>) -> Result<Self> {
-        // Create a new RTCPeerConnection
-        let pc = api::create_subscriber_connection(config.clone()).await?;
-
         // Create track map
         let track_map = Default::default();
 
@@ -98,9 +92,7 @@ impl Peer {
             id: user_id.clone(),
             room: Arc::default(),
             user_id,
-            pc,
             track_map,
-            negotiation_state: Default::default(),
             on_ice_candidate_fn: Arc::default(),
             on_ice_connection_state_change: Arc::default(),
             on_offer_fn: Arc::default(),
@@ -115,30 +107,34 @@ impl Peer {
 
     pub async fn answer(&self, sdp: RTCSessionDescription) -> Result<RTCSessionDescription> {
         if let Some(publisher) = &*self.publisher.lock().await {
-            info!("PeerLocal got offer, peer_id :{}", self.id());
+            info!("[Peer {}] Get offer", self.id());
             if publisher.signaling_state() != RTCSignalingState::Stable {
                 return Err(Error::ErrOfferIgnored.into());
             }
-
-            let rv = publisher.answer(sdp).await;
-            info!("PeerLocal send answer, peer_id :{}", self.id());
-            rv
+            
+            info!("[Publisher {}] Send answer", self.id());
+            publisher.answer(sdp).await
         } else {
             Err(Error::ErrNoTransportEstablished.into())
         }
     }
     /// Clean up any open connections
     pub async fn clean_up(&self) -> Result<()> {
-        if let Some(subscriber) = &*self.subscriber.lock().await {
-            subscriber.close().await?;
+        // Takes out mutex peers
+        let subscriber = self.subscriber.lock().await.take();
+        let publisher = self.publisher.lock().await.take();
+        if let Some(s) = subscriber {
+            s.close().await;
         }
 
-        if let Some(publisher) = &*self.publisher.lock().await {
-            publisher.close().await;
+        if let Some(p) = publisher {
+            p.close().await;
         }
+
+        Ok(())
 
         // TODO: find out if tracks are removed too
-        self.pc.close().await.map_err(Into::into)
+        //self.pc.close().await.map_err(Into::into)
     }
 
 
@@ -220,6 +216,9 @@ impl Peer {
                     }
                 })
             }));
+            //let room_out_1 = room.clone();
+            //let user_id_out = self.user_id.clone();
+            
             *self.subscriber.lock().await = Some(subscriber);
         }
 
@@ -259,11 +258,11 @@ impl Peer {
 
             let on_ice_connection_state_change_out = self.on_ice_connection_state_change.clone();
             let closed_out_2 = self.closed.clone();
+
             publisher
                 .on_ice_connection_state_change(Box::new(move |state: RTCIceConnectionState| {
                     let handler_in = on_ice_connection_state_change_out.clone();
                     let closed_in = closed_out_2.clone();
-                    info!("Publisher peer connection state: {}", state);
 
                     Box::pin(async move {
                         if let Some(h) = &mut *handler_in.lock().await {
@@ -283,7 +282,6 @@ impl Peer {
             "[Peer {}] Adds to room {}",
             id, room_id
         );
-        room.join_user(self.user_id.clone(), vec![]).await;
 
         if !cfg.no_subscribe {
             room.subscribe(self.clone()).await;
@@ -295,6 +293,10 @@ impl Peer {
         self.publisher.lock().await.clone()
     }
 
+    pub async fn register_on_ice_connection_state_change(&self, f: OnIceConnectionStateChangeFn) {
+        let mut handler = self.on_ice_connection_state_change.lock().await;
+        *handler = Some(f);
+    }
     pub async fn on_ice_candidate(&self, f: OnIceCandidateFn) {
         let mut handler = self.on_ice_candidate_fn.lock().await;
         *handler = Some(f);
@@ -359,7 +361,6 @@ impl Debug for Peer {
             .field("id", &self.id)
             .field("room", &self.room)
             .field("user_id", &self.user_id)
-            .field("connection", &self.pc)
             .field("track_map", &self.track_map)
             .finish()
     }

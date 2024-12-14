@@ -8,7 +8,7 @@ use postage::stream::Stream;
 use volcano_sfu::rtc::{
     config::WebRTCTransportConfig,
     peer::{JoinConfig, Peer},
-    room::{Room, RoomEvent, RoomSignal},
+    room::{Room, RoomSignal},
 };
 use webrtc::{ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::sdp::session_description::RTCSessionDescription};
 
@@ -61,16 +61,26 @@ impl Client {
         let ws_worker = async {
             // Read incoming messages
             while let Some(msg) = read.try_next().await? {
-                if let Some(msg) = PacketC2S::from(msg)? {
-                    self.handle_message(msg, &write).await?;
-                } else {
-                    write
-                        .send(PacketS2C::Error {
-                            error: ServerError::UnknownRequest.to_string(),
-                        })
-                        .await?;
+                debug!("Websocket message received.");
+                match PacketC2S::from(msg) {
+                    Ok(packet) => self.handle_message(packet, &write).await?,
+                    Err(e) => {
+                        match e {
+                            ServerError::UnknownRequest => write
+                            .send(PacketS2C::Error {
+                                error: e.to_string(),
+                            })
+                            .await?,
+                            _ => {
+                                debug!("Websocket message is not a packet.");
+                                error!("Error message not handled: {e}");
+                            }
+                        }
+                    }
                 }
             }
+
+            info!("Websocket worker has finished.");
 
             Ok(())
         }
@@ -81,32 +91,8 @@ impl Client {
             let mut listener = signal.listener();
             // Read incoming events
             while let Some(event) = listener.recv().await {
-                match event {
-                    RoomEvent::Create(id) => {
-                        write
-                            .send(PacketS2C::RoomCreate { id, owner: None })
-                            .await?;
-                    }
-                    RoomEvent::DataChannelMessage(msg) => match String::from_utf8(msg) {
-                        Ok(str) => write.send(PacketS2C::Message(str)).await?,
-                        Err(e) => error!("Invalid UTF-8 sequence: {}", e),
-                    },
-                    RoomEvent::RelayPeerRequest { payload, room_id } => {
-                        write.send(PacketS2C::RelayRequest { payload, room_id }).await?;
-                    }
-                    RoomEvent::UserJoin { room_id, user_id, .. } => {
-                        write
-                            .send(PacketS2C::UserJoin {
-                                room_id,
-                                user_id,
-                            })
-                            .await?;
-                    }
-                    RoomEvent::Close(id) => {
-                        write.send(PacketS2C::RoomDelete { id }).await?;
-                    },
-                    _=>{}
-                }
+                warn!("Room listener was experimental. Events might not operate as expected");
+                info!("Room event: {event:?}");
             }
 
             // TODO: maybe throw an error for listener being closed?
@@ -181,7 +167,6 @@ impl Client {
                 Self::handle_offer(peer, write.clone(), description, id).await
             }
             PacketC2S::Trickle { candidate, target } => {
-                info!("Incoming tricke for {target}");
                 peer.trickle(candidate, target).await
             }
         }
@@ -196,7 +181,8 @@ impl Client {
         id: u32,
     ) -> Result<()> {
 
-        room.subscribe_signal(self.signal.clone()).await;
+        // Signaling was experimental.
+        // room.subscribe_signal(self.signal.clone()).await;
         let peer = self.peer.clone();
         let write_out_1 = write.clone();
         let write_out_2 = write.clone();
@@ -224,6 +210,13 @@ impl Client {
             },
         ))
         .await;
+        let peer_id = peer.id().clone();
+        peer.register_on_ice_connection_state_change(Box::new( move |state| {
+            let peer_id_in = peer_id.clone();
+            Box::pin(async move {
+                debug!("[Publisher {}] ICE connection state changed to: {}", peer_id_in, state);
+            })
+        })).await;
 
         if let Err(err) = peer.join(room.id.clone(), cfg).await {
             error!("join error: {}", err);
@@ -239,7 +232,6 @@ impl Client {
                         description: answer,
                     })
                     .await?;
-                info!("Answer sent to client, user: {}", self.user.id);
             }
             Err(err) => {
                 // Client should know error
