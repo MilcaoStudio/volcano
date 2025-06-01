@@ -134,6 +134,7 @@ async fn handle_connection(
             },
             Err(e) => {
                 error!("Error: {e}");
+                write.send(PacketS2C::Error { error: e.to_string() }).await?;
             }
         }
     }
