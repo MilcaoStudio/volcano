@@ -23,7 +23,8 @@ use crate::track::{audio_observer::AudioObserver, router::LocalRouter};
 use super::peer::Peer;
 
 /// Room event which indicates something happened to a peer
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", content = "data")]
 pub enum RoomEvent {
     Create(String),
     Close(String),
