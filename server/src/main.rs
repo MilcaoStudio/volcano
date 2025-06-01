@@ -7,7 +7,7 @@ pub mod signaling;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    pretty_env_logger::init();
+    pretty_env_logger::init_timed();
     signaling::server::launch("0.0.0.0:4000", Box::new(move |token| {
         Box::pin(async move {
             use signaling::server::{UserCapabilities, UserInformation};
