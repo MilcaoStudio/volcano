@@ -2,7 +2,10 @@ use thiserror::Error;
 use tokio_tungstenite::tungstenite::Message;
 
 use volcano_sfu::rtc::{peer::JoinConfig, room::RoomInfo};
-use webrtc::{ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::sdp::session_description::RTCSessionDescription};
+use webrtc::{
+    ice_transport::ice_candidate::RTCIceCandidateInit,
+    peer_connection::sdp::session_description::RTCSessionDescription,
+};
 
 /// Available types of media tracks
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -48,9 +51,7 @@ pub enum Negotiation {
 #[serde(tag = "type")]
 pub enum PacketC2S {
     /// Answer (from client subscriber)
-    Answer {
-        description: RTCSessionDescription,
-    },
+    Answer { description: RTCSessionDescription },
     /// Offer (from negotiation)
     Offer {
         id: u32,
@@ -101,7 +102,7 @@ pub enum PacketS2C {
     /// Accept authentication
     Accept {
         id: u32,
-        available_rooms: Vec<RoomInfo>
+        available_rooms: Vec<RoomInfo>,
     },
     /// Answer (for client publisher)
     Answer {
@@ -152,7 +153,13 @@ pub enum PacketS2C {
         user_id: String,
     },
     /// Disconnection error
-    Error { error: String },
+    Error {
+        error: String,
+    },
+    /// Custom server error
+    ServerError {
+        error: ServerError,
+    },
 }
 
 /// An error occurred on the server
@@ -166,6 +173,8 @@ pub enum ServerError {
     FailedToAuthenticate,
     #[error("Already connected to a room!")]
     AlreadyConnected,
+    #[error("Not authenticated in this session.")]
+    NotAuthenticated,
     #[error("Not connected to any room!")]
     NotConnected,
     #[error("Media type already has an existing track!")]

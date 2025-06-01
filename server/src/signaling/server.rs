@@ -130,11 +130,16 @@ async fn handle_connection(
                     }
                     break;
                 }
-                _ => {}
+                _ => {
+                    write
+                        .send(PacketS2C::ServerError {
+                            error: ServerError::NotAuthenticated,
+                        })
+                        .await?;
+                }
             },
             Err(e) => {
-                error!("Error: {e}");
-                write.send(PacketS2C::Error { error: e.to_string() }).await?;
+                write.send(PacketS2C::ServerError { error: e }).await?;
             }
         }
     }
