@@ -61,9 +61,14 @@ impl Client {
         let ws_worker = async {
             // Read incoming messages
             while let Some(msg) = read.try_next().await? {
-                debug!("Websocket message received.");
+                debug!("[Incoming] Message received.");
                 match PacketC2S::from(msg) {
-                    Ok(packet) => self.handle_message(packet, &write).await?,
+                    Ok(packet) => {
+                        info!("[Incoming] C->S: {:?}", packet);
+                        let result = self.handle_message(packet, &write).await?;
+                        debug!("[Incoming] Done!");
+                        result
+                    },
                     Err(e) => {
                         match e {
                             ServerError::UnknownRequest => write
@@ -125,8 +130,6 @@ impl Client {
 
     /// Handle incoming packet
     async fn handle_message(&mut self, packet: PacketC2S, write: &Sender) -> Result<()> {
-        info!("C->S: {:?}", packet);
-
         let peer = self.peer.clone();
         match packet {
             PacketC2S::Answer { description } => peer.set_remote_description(description).await,

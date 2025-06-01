@@ -309,7 +309,7 @@ impl Peer {
 
     pub async fn set_remote_description(&self, sdp: RTCSessionDescription) -> Result<()> {
         if let Some(subscriber) = &*self.subscriber.lock().await {
-            info!("PeerLocal {} sets remote description", self.id);
+            info!("[Peer {}] sets remote description", self.id);
             subscriber.set_remote_description(sdp).await?;
             self.remote_answer_pending.store(false, Ordering::Relaxed);
 

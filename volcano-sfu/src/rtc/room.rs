@@ -491,7 +491,7 @@ impl Room {
         // TODO: stop the RTP sender thread and drop
     }
 
-    async fn send_room_event(&self, event: RoomEvent) {
+    pub async fn send_room_event(&self, event: RoomEvent) {
         if let Ok(payload) = serde_json::to_string(&event) {
             info!("[Room {}] Sending room event: {}", self.id, payload);
             for peer in self.peers.iter() {
