@@ -170,10 +170,12 @@ pub enum ServerError {
     NotConnected,
     #[error("Media type already has an existing track!")]
     MediaTypeSatisfied,
-    #[error("Request cannot be parsed.")]
-    NotDeserializable,
+    #[error("Bad Request. Reason: {reason}")]
+    BadRequest { reason: String },
     #[error("Request type is unknown.")]
     UnknownRequest,
+    #[error("Received message is not a text.")]
+    UnproccesableEntity,
 }
 
 impl std::fmt::Display for MediaType {
@@ -194,13 +196,14 @@ impl PacketC2S {
             match serde_json::from_str(&text) {
                 Ok(packet) => Ok(packet),
                 Err(e) => {
-                    error!("Error: {e}");
                     error!("Tried to parse packet: {text}");
-                    Err(ServerError::UnknownRequest)
+                    let reason = e.to_string();
+                    error!("Error: {reason}");
+                    Err(ServerError::BadRequest { reason })
                 }
             }
         } else {
-            Err(ServerError::NotDeserializable)
+            Err(ServerError::UnproccesableEntity)
         }
     }
 }
