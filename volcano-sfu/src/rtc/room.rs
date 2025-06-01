@@ -419,7 +419,8 @@ impl Room {
                 self.close_track(id);
             }
 
-            self.publish(RoomEvent::RemoveTrack {
+            //self.publish(RoomEvent::RemoveTrack {
+            self.send_room_event(RoomEvent::RemoveTrack {
                 room: self.id.clone(),
                 removed_tracks,
             })
