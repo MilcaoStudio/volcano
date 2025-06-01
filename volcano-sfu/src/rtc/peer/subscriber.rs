@@ -268,14 +268,16 @@ impl Subscriber {
     pub async fn set_remote_description(&self, sdp: RTCSessionDescription) -> Result<()> {
         self.pc.set_remote_description(sdp).await?;
 
-        let candidates = self.candidates.lock().await;
+        let mut candidates = self.candidates.lock().await;
+        
+        info!("[Subscriber {}] ICE candidates ({})", self.id, candidates.len());
         for candidate in &*candidates {
-            self.pc.add_ice_candidate(candidate.clone()).await?;
+            if let Err(err) = self.pc.add_ice_candidate(candidate.clone()).await {
+                warn!("add_ice_candidate error: {}", err);
+            };
         }
-
-        self.candidates.lock().await.clear();
-
-        info!("Answer accepted");
+        
+        candidates.clear();
         Ok(())
     }
 }
