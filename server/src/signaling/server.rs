@@ -86,12 +86,7 @@ async fn accept_connection(stream: TcpStream, auth: Arc<AuthFn>, w: Arc<WebRTCTr
 
     // Handle any resulting errors
     if let Err(error) = handle_connection((read, write.clone()), auth, w).await {
-        write
-            .send(PacketS2C::Error {
-                error: error.to_string(),
-            })
-            .await
-            .ok();
+        error!("Connection ended with error: {error}");
     }
 }
 
