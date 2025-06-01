@@ -21,7 +21,7 @@ RUN cargo install --path server
 RUN rm */src/*.rs target/release/deps/volcano*
 
 # Bundle
-FROM debian:bookworm
+FROM gcr.io/distroless/cc-debian12
 COPY --from=build /usr/local/cargo/bin/server ./volcano-server
 COPY config.toml ./config.toml
 

@@ -1,0 +1,13 @@
+# GIT
+.git
+.gitignore
+
+# Build
+/target
+
+# IDE
+.vscode
+
+# Environment
+.env
+.env.example
