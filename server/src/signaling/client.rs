@@ -65,9 +65,11 @@ impl Client {
                 match PacketC2S::from(msg) {
                     Ok(packet) => {
                         info!("[Incoming] C->S: {:?}", packet);
-                        let result = self.handle_message(packet, &write).await?;
-                        debug!("[Incoming] Done!");
-                        result
+                        let result = self.handle_message(packet, &write).await;
+                        match result {
+                            Ok(_) => debug!("[Incoming] Done!"),
+                            Err(e) => error!("[Incoming] Error: {e}"),
+                        }
                     },
                     Err(e) => {
                         match e {
