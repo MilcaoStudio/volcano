@@ -277,6 +277,9 @@ impl Peer {
             "[Peer {}] Adds to room {}",
             id, room_id
         );
+        
+        // Send user join event with no tracks
+        room.join_user(id.to_owned(), Vec::new()).await;
 
         if !cfg.no_subscribe {
             room.subscribe(self.clone()).await;

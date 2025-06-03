@@ -116,6 +116,9 @@ pub enum PacketS2C {
         /// IDs of tracks that are no longer being produced
         removed_tracks: Vec<String>,
     },
+    RoomInfo {
+        room: RoomInfo,
+    },
     /// Offer (for client subscriber)
     Offer {
         description: RTCSessionDescription,

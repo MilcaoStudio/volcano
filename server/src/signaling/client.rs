@@ -280,6 +280,12 @@ impl Client {
                 error!("answer error: {}", err);
             }
         };
+
+        // Send room info
+        let room_info = room.get_room_info();
+        if let Err(err) = write.send(PacketS2C::RoomInfo { room: room_info }).await {
+            error!("send room info error: {}", err);
+        };
         Ok(())
     }
 
