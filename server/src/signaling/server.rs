@@ -99,7 +99,7 @@ async fn handle_connection(
     // Wait until valid packet is sent
     let mut client: Option<Client> = None;
     while let Some(msg) = read.next().await {
-        match PacketC2S::from(msg?) {
+        match PacketC2S::from(&msg?) {
             Ok(packet) => match packet {
                 PacketC2S::Connect {
                     id,

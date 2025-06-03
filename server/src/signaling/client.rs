@@ -62,7 +62,8 @@ impl Client {
             // Read incoming messages
             while let Some(msg) = read.try_next().await? {
                 debug!("[Incoming] Message received.");
-                match PacketC2S::from(msg) {
+
+                match PacketC2S::from(&msg) {
                     Ok(packet) => {
                         info!("[Incoming] C->S: {:?}", packet);
                         let result = self.handle_message(packet, &write).await;
@@ -78,6 +79,10 @@ impl Client {
                                 error: e.to_string(),
                             })
                             .await?,
+                            ServerError::UnproccesableEntity => {
+                                debug!("[Incoming] Message is not text.");
+                                debug!("msg -> {}", msg.into_text().unwrap_or_else(|e| e.to_string()))
+                            }
                             _ => {
                                 debug!("Websocket message is not a packet.");
                                 error!("Error message not handled: {e}");

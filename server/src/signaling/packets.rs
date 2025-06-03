@@ -200,9 +200,9 @@ impl std::fmt::Display for MediaType {
 
 impl PacketC2S {
     /// Create a packet from incoming Message
-    pub fn from(message: Message) -> Result<Self, ServerError> {
+    pub fn from(message: &Message) -> Result<Self, ServerError> {
         if let Message::Text(text) = message {
-            match serde_json::from_str(&text) {
+            match serde_json::from_str(text) {
                 Ok(packet) => Ok(packet),
                 Err(e) => {
                     error!("Tried to parse packet: {text}");
