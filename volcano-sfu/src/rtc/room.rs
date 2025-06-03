@@ -323,7 +323,9 @@ impl Room {
     }
 
     pub async fn remove_peer(&self, peer_id: &str) -> usize {
-        self.peers.remove(peer_id);
+        if let Some((_, peer)) = self.peers.remove(peer_id) {
+            peer.clean_up().await;
+        };
 
         let peer_count = self.peers.len();
         peer_count

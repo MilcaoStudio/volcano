@@ -119,7 +119,7 @@ impl Peer {
         }
     }
     /// Clean up any open connections
-    pub async fn clean_up(&self) -> Result<()> {
+    pub async fn clean_up(&self) {
         // Takes out mutex peers
         let subscriber = self.subscriber.lock().await.take();
         let publisher = self.publisher.lock().await.take();
@@ -130,11 +130,6 @@ impl Peer {
         if let Some(p) = publisher {
             p.close().await;
         }
-
-        Ok(())
-
-        // TODO: find out if tracks are removed too
-        //self.pc.close().await.map_err(Into::into)
     }
 
 

@@ -179,6 +179,8 @@ pub enum ServerError {
     NotConnected,
     #[error("Media type already has an existing track!")]
     MediaTypeSatisfied,
+    #[error("Peer connection failed!")]
+    PeerConnectionFailed,
     #[error("Bad Request. Reason: {reason}")]
     BadRequest { reason: String },
     #[error("Request type is unknown.")]

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures::{
-    future::{select, Either}, pin_mut, FutureExt, TryStreamExt
+    future::{select, Either},
+    pin_mut, FutureExt, TryStreamExt,
 };
 use postage::stream::Stream;
 use volcano_sfu::rtc::{
@@ -10,7 +11,12 @@ use volcano_sfu::rtc::{
     peer::{JoinConfig, Peer},
     room::{Room, RoomSignal},
 };
-use webrtc::{ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::sdp::session_description::RTCSessionDescription};
+use webrtc::{
+    ice_transport::{
+        ice_candidate::RTCIceCandidateInit, ice_connection_state::RTCIceConnectionState,
+    },
+    peer_connection::sdp::session_description::RTCSessionDescription,
+};
 
 use super::{
     packets::{PacketC2S, PacketS2C, ServerError},
@@ -71,24 +77,27 @@ impl Client {
                             Ok(_) => debug!("[Incoming] Done!"),
                             Err(e) => error!("[Incoming] Error: {e}"),
                         }
-                    },
-                    Err(e) => {
-                        match e {
-                            ServerError::UnknownRequest => write
-                            .send(PacketS2C::Error {
-                                error: e.to_string(),
-                            })
-                            .await?,
-                            ServerError::UnproccesableEntity => {
-                                debug!("[Incoming] Message is not text.");
-                                debug!("msg -> {}", msg.into_text().unwrap_or_else(|e| e.to_string()))
-                            }
-                            _ => {
-                                debug!("Websocket message is not a packet.");
-                                error!("Error message not handled: {e}");
-                            }
-                        }
                     }
+                    Err(e) => match e {
+                        ServerError::UnknownRequest => {
+                            write
+                                .send(PacketS2C::Error {
+                                    error: e.to_string(),
+                                })
+                                .await?
+                        }
+                        ServerError::UnproccesableEntity => {
+                            debug!("[Incoming] Message is not text.");
+                            debug!(
+                                "msg -> {}",
+                                msg.into_text().unwrap_or_else(|e| e.to_string())
+                            )
+                        }
+                        _ => {
+                            debug!("Websocket message is not a packet.");
+                            error!("Error message not handled: {e}");
+                        }
+                    },
                 }
             }
 
@@ -97,7 +106,7 @@ impl Client {
             Ok(())
         }
         .fuse();
-    
+
         let room_worker = async {
             debug!("Created room listener");
             let mut listener = signal.listener();
@@ -110,7 +119,8 @@ impl Client {
             // TODO: maybe throw an error for listener being closed?
             info!("Closing room listener");
             anyhow::Ok(())
-        }.fuse();
+        }
+        .fuse();
 
         // Pin futures on the stack
         pin_mut!(ws_worker, room_worker);
@@ -124,15 +134,17 @@ impl Client {
     /// Clean up after ourselves by disconnecting from the room,
     /// closing the peer connection and removing tracks.
     pub async fn lifecycle_clean_up(&mut self) -> Result<()> {
-        info!("User {} disconnected", self.user.id);
+        let user_id = &self.user.id;
+        info!("User {} disconnected", user_id);
         if let Some(room) = &self.room {
-            room.unsubscribe_signal(&self.user.id).await;
-            room.remove_user(&self.user.id).await;
+            room.unsubscribe_signal(user_id).await;
+            room.remove_peer(user_id).await;
+            room.remove_user(user_id).await;
             if room.is_empty() {
-                room.close().await;
+                debug!("Room {} is empty. Should clean up?", room.id);
             }
         }
-        self.peer.clean_up().await
+        Ok(())
     }
 
     /// Handle incoming packet
@@ -142,7 +154,6 @@ impl Client {
             PacketC2S::Answer { description } => peer.set_remote_description(description).await,
             PacketC2S::Connect { .. } => Err(ServerError::AlreadyConnected.into()),
             PacketC2S::Continue { .. } => {
-
                 // TODO: Add Continue event
                 Ok(())
             }
@@ -160,7 +171,7 @@ impl Client {
                 match &self.room {
                     Some(room) => {
                         // Close all peers
-                        self.peer.clean_up().await?;
+                        room.remove_peer(&self.user.id).await;
                         // Remove user
                         room.remove_user(&self.user.id).await;
                         if room.is_empty() {
@@ -173,12 +184,10 @@ impl Client {
                 }
             }
             PacketC2S::Remove { removed_tracks: _ } => Ok(()),
-            PacketC2S::Offer {id, description } => {
+            PacketC2S::Offer { id, description } => {
                 Self::handle_offer(peer, write.clone(), description, id).await
             }
-            PacketC2S::Trickle { candidate, target } => {
-                peer.trickle(candidate, target).await
-            }
+            PacketC2S::Trickle { candidate, target } => peer.trickle(candidate, target).await,
         }
     }
 
@@ -190,12 +199,12 @@ impl Client {
         cfg: JoinConfig,
         id: u32,
     ) -> Result<()> {
-
         // Signaling was experimental.
         // room.subscribe_signal(self.signal.clone()).await;
         let peer = self.peer.clone();
         let write_out_1 = write.clone();
         let write_out_2 = write.clone();
+        let write_out_3 = write.clone();
         peer.on_offer(Box::new(move |offer| {
             let write_in = write_out_1.clone();
             Box::pin(async move {
@@ -221,12 +230,30 @@ impl Client {
         ))
         .await;
         let peer_id = peer.id().clone();
-        peer.register_on_ice_connection_state_change(Box::new( move |state| {
+        peer.register_on_ice_connection_state_change(Box::new(move |state| {
             let peer_id_in = peer_id.clone();
+            let write_in = write_out_3.clone();
             Box::pin(async move {
-                debug!("[Publisher {}] ICE connection state changed to: {}", peer_id_in, state);
+                debug!(
+                    "[Publisher {}] ICE connection state changed to: {}",
+                    peer_id_in, state
+                );
+                match state {
+                    RTCIceConnectionState::Failed => {
+                        if let Err(err) = write_in
+                            .send(PacketS2C::ServerError {
+                                error: ServerError::PeerConnectionFailed,
+                            })
+                            .await
+                        {
+                            error!("Write failed: {err}");
+                        };
+                    }
+                    _ => {}
+                }
             })
-        })).await;
+        }))
+        .await;
 
         if let Err(err) = peer.join(room.id.clone(), cfg).await {
             error!("join error: {}", err);
@@ -245,7 +272,11 @@ impl Client {
             }
             Err(err) => {
                 // Client should know error
-                write.send(PacketS2C::Error { error: err.to_string() }).await?;
+                write
+                    .send(PacketS2C::Error {
+                        error: err.to_string(),
+                    })
+                    .await?;
                 error!("answer error: {}", err);
             }
         };
