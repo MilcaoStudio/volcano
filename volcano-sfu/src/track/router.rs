@@ -172,7 +172,7 @@ impl LocalRouter {
                             s_in.remove_down_track(&r_in.stream_id(), &down_track_in)
                                 .await;
                             info!("RemoveDownTrack Negotiate");
-                            if let Err(err) = s_in.negotiate().await {
+                            if let Err(err) = s_in.negotiate(None).await {
                                 error!("negotiate err:{} ", err);
                             }
                         }
@@ -214,7 +214,7 @@ impl LocalRouter {
         if let Some(receiver) = r {
             info!("Add actual downtrack to subscriber, subscriber: {}", subscriber.id);
             self.add_down_track(subscriber.clone(), receiver).await?;
-            subscriber.negotiate().await?;
+            subscriber.negotiate(None).await?;
             return Ok(());
         }
 
@@ -231,7 +231,7 @@ impl LocalRouter {
             for val in recs {
                 self.add_down_track(subscriber.clone(), val.clone()).await?;
             }
-            subscriber.negotiate().await?;
+            subscriber.negotiate(None).await?;
         }
 
         Ok(())
@@ -255,13 +255,18 @@ impl LocalRouter {
             RTPCodecType::Audio => {
                 let room_out = self.room.clone();
                 let stream_id_out = stream_id.clone();
-                buffer.register_on_audio_level(Box::new(move |level| {
+                buffer.register_on_audio_level(Box::new(move |voice, level| {
                     let room_in = room_out.clone();
                     let stream_id_in = stream_id_out.clone();
                     Box::pin(async move {
+                        if !voice {
+                            debug!("Skip observation");
+                            return;
+                        }
                         room_in.audio_observer.lock().await.observe(&stream_id_in, level).await;
                     })
                 })).await;
+                debug!("[Room {}] add stream {} to audio observer", self.room.id, stream_id);
                 self.room.audio_observer.lock().await.add_stream(stream_id).await;
             },
             RTPCodecType::Video => {

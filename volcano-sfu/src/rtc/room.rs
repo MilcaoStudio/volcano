@@ -8,19 +8,18 @@ use postage::{
     broadcast::{channel, Receiver, Sender},
     sink::Sink,
 };
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::{interval, Duration}};
 use ulid::Ulid;
 use webrtc::{
-    data::data_channel::DataChannel,
-    data_channel::{
+    data::data_channel::DataChannel, data_channel::{
         data_channel_message::DataChannelMessage, data_channel_state::RTCDataChannelState,
         RTCDataChannel,
-    }, track::track_local::{TrackLocal, track_local_static_rtp::TrackLocalStaticRTP},
+    }, peer_connection::offer_answer_options::RTCOfferOptions, track::track_local::{track_local_static_rtp::TrackLocalStaticRTP, TrackLocal}
 };
 
 use serde::Serialize;
 
-use crate::track::{audio_observer::AudioObserver, router::LocalRouter};
+use crate::{track::{audio_observer::AudioObserver, router::LocalRouter}};
 
 use super::peer::Peer;
 
@@ -39,6 +38,10 @@ pub enum RoomEvent {
     RemoveTrack {
         removed_tracks: Vec<String>,
         room: String,
+    },
+    VoiceActivity {
+        room_id: String,
+        stream_ids: Vec<String>,
     },
     UserJoin {
         room_id: String,
@@ -93,7 +96,7 @@ impl Room {
             signalers: Default::default(),
             labels: Default::default(),
             peers: Default::default(),
-            audio_observer: Arc::new(Mutex::new(AudioObserver::new(100, 80, 50))),
+            audio_observer: Arc::new(Mutex::new(AudioObserver::new(65, 600, 50))),
             user_tracks: Default::default(),
             tracks: Default::default(),
         })
@@ -172,7 +175,10 @@ impl Room {
             }
 
             info!("Data channel negotiation");
-            if let Err(err) = subscriber.negotiate().await {
+            if let Err(err) = subscriber.negotiate(Some(RTCOfferOptions {
+                ice_restart: true,
+                voice_activity_detection: true,
+            })).await {
                 error!("negotiate error:{}", err);
             } else {
                 info!("Data channel negotiation successful");
@@ -202,11 +208,13 @@ impl Room {
             }));
             let room_id = self.id.clone();
             info!("[Room {room_id}] Data channel negotiation");
-            if let Err(err) = subscriber.negotiate().await {
+            if let Err(err) = subscriber.negotiate(None).await {
                 error!("[Room {room_id}] negotiate error: {}", err);
             } else {
-                info!("[Room {room_id}] Data channel negotiation successful");
+                info!("[Room {room_id}] Negotiation successful");
             }
+        } else {
+            error!("[Room {}] Unknown peer {id}", self.id);
         }
     }
 
@@ -367,6 +375,24 @@ impl Room {
         return RoomInfo { id: self.id.clone(), users };
     }
 
+    async fn start_audio_observer_task(self: &Arc<Self>) {
+        let observer = self.audio_observer.clone();
+        let mut interval = interval(Duration::from_millis(500));
+        let room_out = self.clone();
+        tokio::spawn(async move {
+            loop {
+                interval.tick().await;
+                let mut observer_in = observer.lock().await;
+                let streams = observer_in.calc().await;
+                if let Some(streams) = streams {
+                    info!("Streams {:?}", streams);
+                    room_out.send_message(RoomEvent::VoiceActivity { room_id: room_out.id.clone(), stream_ids: streams }).await;
+                }
+            }
+        });
+        info!("Audio observer task started");
+    }
+
     pub async fn subscribe(self: &Arc<Self>, peer: Arc<Peer>) {
         info!("Subscribing a new peer");
 
@@ -414,10 +440,16 @@ impl Room {
             }
 
             info!("Subscribe Negotiate");
-            if let Err(err) = peer.subscriber().await.unwrap().negotiate().await {
+            if let Err(err) = peer.subscriber().await.unwrap().negotiate(None).await {
                 error!("negotiate error: {}", err);
             }
         }
+
+        // Offer API data channel to client subscriber
+        self.add_api_channel(&peer.id()).await;
+
+        // Start audio observer task
+        self.start_audio_observer_task().await;
     }
     /// Remove a user from the room
     pub async fn remove_user(&self, id: &str) {

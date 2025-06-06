@@ -15,7 +15,7 @@ use webrtc::{
         ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}, ice_connection_state::RTCIceConnectionState
     },
     peer_connection::{
-        configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState
+        configuration::RTCConfiguration, offer_answer_options::RTCOfferOptions, sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState
     },
 };
 
@@ -160,13 +160,19 @@ impl Peer {
             inner_subscriber.no_auto_subscribe = cfg.no_auto_subscribe;
             let subscriber = Arc::new(inner_subscriber);
             let remote_answer_pending_out = self.remote_answer_pending.clone();
+            //let remote_answer_pending_out_2 = self.remote_answer_pending.clone();
             let negotiation_pending_out = self.negotiation_pending.clone();
+            //let negotiation_pending_out_2 = self.negotiation_pending.clone();
             let closed_out = self.closed.clone();
+            //let closed_out_2 = self.closed.clone();
             let sub = Arc::clone(&subscriber);
+            //let sub_2 = Arc::clone(&subscriber);
             let on_offer_handler_out = self.on_offer_fn.clone();
+            //let on_offer_handler_out_2 = self.on_offer_fn.clone();
             let id_clone_out = id.clone();
+            //let id_clone_out_2 = id.clone();
             subscriber
-                .register_on_negociate(Box::new(move || {
+                .register_on_negotiate(Box::new(move |offer_options: Option<RTCOfferOptions>| {
                     let remote_answer_pending_in = remote_answer_pending_out.clone();
                     let negotiation_pending_in = negotiation_pending_out.clone();
                     let closed_in = closed_out.clone();
@@ -174,12 +180,14 @@ impl Peer {
                     let sub_in = sub.clone();
                     let on_offer_handler_in = on_offer_handler_out.clone();
                     Box::pin(async move {
+                        debug!("Start negotiation");
                         if remote_answer_pending_in.load(Ordering::Relaxed) {
                             (*negotiation_pending_in).store(true, Ordering::Relaxed);
+                            debug!("Negotiation set to pending. Reason: Remote answer pending");
                             return Ok(());
                         }
 
-                        let offer = sub_in.create_offer().await?;
+                        let offer = sub_in.create_offer(offer_options).await?;
                         (*remote_answer_pending_in).store(true, Ordering::Relaxed);
 
                         if let Some(on_offer) = &mut *on_offer_handler_in.lock().await {
@@ -193,6 +201,7 @@ impl Peer {
                     })
                 }))
                 .await;
+          
             let on_ice_candidate_out = self.on_ice_candidate_fn.clone();
             let closed_out_ = self.closed.clone();
             subscriber.register_on_ice_candidate(Box::new(move |candidate| {
@@ -223,7 +232,7 @@ impl Peer {
                     if let Some(sub) = &*self.subscriber.lock().await {
                         sub.add_data_channel(&dc.config.label).await?;
                         info!("[Subscriber {}] Trying to offer...", sub.id);
-                        sub.create_offer().await?;
+                        sub.create_offer(None).await?;
                     }
                 }
             }
@@ -314,8 +323,19 @@ impl Peer {
             if self.negotiation_pending.load(Ordering::Relaxed) {
                 self.negotiation_pending.store(false, Ordering::Relaxed);
                 info!("Subscriber negotiate");
-                subscriber.negotiate().await?;
+                subscriber.negotiate(None).await?;
             }
+
+            // set renegotation method for subscriber
+            let sub = Arc::clone(&subscriber);
+            subscriber.pc.on_negotiation_needed(Box::new(move || {
+                let sub_in = sub.clone();
+                Box::pin(async move {
+                info!("Start renegotiation");
+                if let Err(err) = sub_in.negotiate(Some( RTCOfferOptions { voice_activity_detection: true, ice_restart: true })).await {
+                    error!("renegotiate err: {}", err);
+                }
+            })}));
         } else {
             return Err(Error::ErrNoTransportEstablished.into());
         }

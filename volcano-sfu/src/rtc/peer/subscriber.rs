@@ -7,6 +7,7 @@ use tokio::time::{sleep, Duration};
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
+use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtcp::source_description::SourceDescription;
 use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
@@ -38,11 +39,14 @@ pub struct Subscriber {
     channels: Arc<Mutex<HashMap<String, Arc<RTCDataChannel>>>>,
     candidates: Arc<Mutex<Vec<RTCIceCandidateInit>>>,
     on_negotiate: Arc<Mutex<Option<OnNegotiateFn>>>,
+    on_renegotiate: Arc<Mutex<Option<OnRenegotiateFn>>>,
     pub no_auto_subscribe: bool,
 }
 
 pub type OnNegotiateFn =
-    Box<dyn (FnMut() -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>) + Send + Sync>;
+    Box<dyn (FnMut(Option<RTCOfferOptions>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>) + Send + Sync>;
+pub type OnRenegotiateFn =
+    Box<dyn (FnMut(bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>) + Send + Sync>;
 
 impl Subscriber {
     pub async fn new(id: String, c: Arc<WebRTCTransportConfig>) -> Result<Self> {
@@ -59,6 +63,7 @@ impl Subscriber {
             channels: Default::default(),
             candidates: Default::default(),
             on_negotiate: Default::default(),
+            on_renegotiate: Default::default(),
             no_auto_subscribe: Default::default(),
         };
         subscriber.on_ice_connection_state_change().await;
@@ -129,8 +134,8 @@ impl Subscriber {
         Ok(data_channel)
     }
 
-    pub async fn create_offer(&self) -> Result<RTCSessionDescription> {
-        let offer = self.pc.create_offer(None).await?;
+    pub async fn create_offer(&self, options: Option<RTCOfferOptions>) -> Result<RTCSessionDescription> {
+        let offer = self.pc.create_offer(options).await?;
         self.pc.set_local_description(offer.clone()).await?;
         Ok(offer)
     }
@@ -170,8 +175,13 @@ impl Subscriber {
         self.pc.on_ice_candidate(f)
     }
 
-    pub async fn register_on_negociate(&self, f: OnNegotiateFn) {
+    pub async fn register_on_negotiate(&self, f: OnNegotiateFn) {
         let mut handler = self.on_negotiate.lock().await;
+        *handler = Some(f);
+    }
+
+    pub async fn register_on_renegotiate(&self, f: OnRenegotiateFn) {
+        let mut handler = self.on_renegotiate.lock().await;
         *handler = Some(f);
     }
 
@@ -183,11 +193,18 @@ impl Subscriber {
         self.tracks.lock().await.get(stream_id).cloned()
     }
 
-    pub async fn negotiate(&self) -> Result<()> {
-        info!("Calling negotitation");
+    pub async fn negotiate(&self, offer_options: Option<RTCOfferOptions>) -> Result<()> {
         let mut handler = self.on_negotiate.lock().await;
         if let Some(f) = &mut *handler {
-            f().await?;
+            f(offer_options).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn renegotiate(&self, ice_restart: bool) -> Result<()> {
+        let mut handler = self.on_renegotiate.lock().await;
+        if let Some(f) = &mut *handler {
+            f(ice_restart).await?;
         }
         Ok(())
     }

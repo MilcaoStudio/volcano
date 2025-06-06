@@ -19,7 +19,7 @@ impl AudioObserver {
     /// Creates an audio observer with threshold lower than 128, an interval, and a filter from 0 to 100.
     /// ## Example
     /// ```
-    /// let observer = AudioObserver::new(100, 80, 50);
+    /// let observer = AudioObserver::new(70, 80, 50);
     /// ```
     pub fn new(threshold_parameter: u8, interval_parameter: i32, filter_parameter: i32) -> Self {
         let mut threshold: u8 = threshold_parameter;
@@ -48,11 +48,12 @@ impl AudioObserver {
     }
 
     pub async fn remove_stream(&mut self, stream_id: &str) {
+        debug!("Remove stream {}", stream_id);
         let mut streams = self.streams.lock().await;
         streams.retain(|stream| !stream.id.eq(stream_id));
     }
 
-    /// Observes whether d_bov is higher than threshold for target stream.
+    /// Observes whether d_bov is higher than threshold for target stream, then it should be ignored.
     /// If d_bov is lower or equal than treshold, it sums d_bov into target stream.
     pub async fn observe(&self, stream_id: &str, d_bov: u8) {
         let mut streams = self.streams.lock().await;
@@ -61,6 +62,7 @@ impl AudioObserver {
             .find(|stream| stream.id.eq(stream_id));
         
         if let Some(stream) = target {
+            // Active voice level should be lower than threshold
             if d_bov <= self.threshold {
                 stream.sum += d_bov as i32;
                 stream.total += 1;
@@ -85,6 +87,7 @@ impl AudioObserver {
 
         for stream in streams.iter_mut() {
             if stream.total >= self.expected {
+                debug!("[stream {}] {}/{} (acceptable)", stream.id, stream.total, self.expected);
                 stream_ids.push(stream.id.clone());
             }
 
@@ -94,12 +97,14 @@ impl AudioObserver {
 
         if self.previous.len() == stream_ids.len() {
             for idx in 0..self.previous.len() {
+                // If any stream id is different, reset the previous vector.
                 if self.previous[idx] != stream_ids[idx] {
                     self.previous = stream_ids.clone();
 
                     return Some(stream_ids);
                 }
             }
+            // If all stream ids are the same, do not reset the previous vector.
             return None;
         }
         self.previous = stream_ids.clone();
