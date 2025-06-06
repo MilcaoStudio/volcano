@@ -205,7 +205,7 @@ impl Publisher {
             if channel.label() == super::subscriber::API_CHANNEL_LABEL {
                 info!("[Publisher {id_in}] API data channel published from client!");
                 return Box::pin(async move {
-                    room_in.add_api_channel(&id_in).await;
+                    //room_in.add_api_channel(&id_in).await;
                 });
             }
             Box::pin(async move {
