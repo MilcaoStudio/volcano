@@ -73,7 +73,7 @@ pub struct DownTrackInternal {
     pub last_ssrc: AtomicU32,
     pub codec: RTCRtpCodecCapability,
     pub receiver: Arc<dyn Receiver>,
-    pub write_stream: Mutex<Option<Arc<dyn TrackLocalWriter + Send + Sync>>>, //TrackLocalWriter,
+    pub write_stream: Mutex<Option<Arc<dyn TrackLocalWriter + Send + Sync>>>, //Option<TrackLocalWriter>,
     on_bind_handler: Arc<Mutex<Option<OnBindFn>>>,
 
     #[allow(dead_code)]
@@ -253,7 +253,7 @@ impl TrackLocal for DownTrackInternal {
         let mut payload_type = self.payload_type.lock().await;
         *payload_type = codec.payload_type;
         let mut write_stream = self.write_stream.lock().await;
-        *write_stream = t.write_stream();
+        *write_stream = Some(t.write_stream());
         let mut mime = self.mime.lock().await;
         *mime = codec.capability.mime_type.to_lowercase();
         self.re_sync.store(true, Ordering::Relaxed);
