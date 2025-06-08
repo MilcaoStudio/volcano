@@ -140,7 +140,7 @@ impl Peer {
         self.id.clone()
     }
 
-    pub async fn join(self: &Arc<Self>, room: Arc<Room>, cfg: JoinConfig) -> Result<()> {
+    pub async fn join(self: &Arc<Self>, room: Arc<Room>, cfg: &JoinConfig) -> Result<()> {
         let id = &self.id;
         info!("[{id}] Join to {} requested", room.id);
         
@@ -158,7 +158,7 @@ impl Peer {
 
         if !cfg.no_subscribe {
             let mut inner_subscriber =
-                Subscriber::new(self.user_id.clone(), self.config.clone()).await?;
+                Subscriber::new(self.user_id.clone(), &self.config).await?;
             inner_subscriber.no_auto_subscribe = cfg.no_auto_subscribe;
             let subscriber = Arc::new(inner_subscriber);
             let remote_answer_pending_out = self.remote_answer_pending.clone();

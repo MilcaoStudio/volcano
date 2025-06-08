@@ -49,7 +49,7 @@ pub type OnRenegotiateFn =
     Box<dyn (FnMut(bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>) + Send + Sync>;
 
 impl Subscriber {
-    pub async fn new(id: String, c: Arc<WebRTCTransportConfig>) -> Result<Self> {
+    pub async fn new(id: String, c: &Arc<WebRTCTransportConfig>) -> Result<Self> {
         let pc = api::create_subscriber_connection(c).await?;
         let api_channel = pc.create_data_channel(API_CHANNEL_LABEL, Some(RTCDataChannelInit::default())).await?;
         info!("[Subscriber {id}] Created data channel `{API_CHANNEL_LABEL}` (awaiting for offer)");
@@ -78,7 +78,7 @@ impl Subscriber {
         info!("[{}] Created data channel `{}` (awaiting for offer)", self.id, ndc.label());
         let tracks_out = self.tracks.clone();
 
-        let ndc_1 = ndc.clone();
+        let ndc_1: Arc<RTCDataChannel> = ndc.clone();
         let ndc_2 = ndc.clone();
         ndc.on_open(Box::new(move || {
             Box::pin(async move {

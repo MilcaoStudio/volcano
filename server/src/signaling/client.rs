@@ -166,7 +166,7 @@ impl Client {
                 let router_config = &peer.config().router;
                 let room = Room::get_or_create(&room_id, router_config);
                 self.room = Some(room.clone());
-                self.handle_join(write, room, offer, cfg, id).await
+                self.handle_join(write, room, offer, &cfg, id).await
             }
             PacketC2S::Leave => {
                 match &self.room {
@@ -197,12 +197,12 @@ impl Client {
         write: &Sender,
         room: Arc<Room>,
         initial_offer: RTCSessionDescription,
-        cfg: JoinConfig,
+        cfg: &JoinConfig,
         id: u32,
     ) -> Result<()> {
         // Signaling was experimental.
         // room.subscribe_signal(self.signal.clone()).await;
-        let peer = self.peer.clone();
+        let peer = &self.peer;
         let write_out_1 = write.clone();
         let write_out_2 = write.clone();
         let write_out_3 = write.clone();
