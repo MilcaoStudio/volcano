@@ -163,9 +163,10 @@ impl Client {
                 offer,
                 cfg,
             } => {
-                let room = Room::get(&room_id);
+                let router_config = &peer.config().router;
+                let room = Room::get_or_create(&room_id, router_config);
                 self.room = Some(room.clone());
-                self.handle_join(write, room.clone(), offer, cfg, id).await
+                self.handle_join(write, room, offer, cfg, id).await
             }
             PacketC2S::Leave => {
                 match &self.room {
@@ -255,7 +256,7 @@ impl Client {
         }))
         .await;
 
-        if let Err(err) = peer.join(room.id.clone(), cfg).await {
+        if let Err(err) = peer.join(room.clone(), cfg).await {
             error!("join error: {}", err);
             return Err(err);
         }

@@ -10,8 +10,9 @@ pub struct AudioStream {
 #[derive(Default, Clone, Debug)]
 pub struct AudioObserver {
     streams: Arc<Mutex<Vec<AudioStream>>>,
-    expected: i32,
-    threshold: u8,
+    pub expected: i32,
+    pub threshold: u8,
+    pub interval: i32,
     previous: Vec<String>,
 }
 
@@ -35,6 +36,7 @@ impl AudioObserver {
         }
         Self {
             threshold,
+            interval: interval_parameter,
             expected: interval_parameter * filter / 2000,
             ..Default::default()
         }
@@ -110,5 +112,10 @@ impl AudioObserver {
         self.previous = stream_ids.clone();
 
         Some(stream_ids)
+    }
+
+    /// Returns true if there are no streams.
+    pub async fn is_empty(&self) -> bool {
+        self.streams.lock().await.is_empty()
     }
 }

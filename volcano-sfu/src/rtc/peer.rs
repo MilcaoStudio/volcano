@@ -132,16 +132,18 @@ impl Peer {
         }
     }
 
+    pub fn config(&self) -> Arc<WebRTCTransportConfig> {
+        self.config.clone()
+    }
 
     pub fn id(&self) -> String {
         self.id.clone()
     }
 
-    pub async fn join(self: &Arc<Self>, room_id: String, cfg: JoinConfig) -> Result<()> {
+    pub async fn join(self: &Arc<Self>, room: Arc<Room>, cfg: JoinConfig) -> Result<()> {
         let id = &self.id;
-        info!("[{id}] Join to {room_id} requested");
+        info!("[{id}] Join to {} requested", room.id);
         
-        let room = Room::get(&room_id);
         *self.room.lock().await = Some(room.clone());
         let rtc_config_clone = RTCConfiguration {
             ice_servers: self.config.configuration.ice_servers.clone(),
@@ -284,7 +286,7 @@ impl Peer {
         room.add_peer(self.clone()).await;
         info!(
             "[Peer {}] Adds to room {}",
-            id, room_id
+            id, room.id
         );
         
         // Send user join event with no tracks

@@ -67,11 +67,9 @@ pub struct RouterConfig {
     #[serde(rename = "audiolevelinterval")]
     pub audio_level_interval: i32,
     #[serde(rename = "audiolevelthreshold")]
-    #[allow(dead_code)]
-    audio_level_threshold: u8,
+    pub audio_level_threshold: u8,
     #[serde(rename = "audiolevelfilter")]
-    #[allow(dead_code)]
-    audio_level_filter: i32,
+    pub audio_level_filter: i32,
     pub simulcast: SimulcastConfig,
 }
 

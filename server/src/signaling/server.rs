@@ -7,7 +7,6 @@ use volcano_sfu::{
         config::{self, WebRTCTransportConfig},
         room::Room,
     },
-    turn,
 };
 
 use super::{
@@ -51,9 +50,9 @@ pub async fn launch<A: ToSocketAddrs>(addr: A, auth: AuthFn) -> Result<()> {
         .inspect_err(|e| error!("Error loading config: {e}. Loading default config."))
         .unwrap_or_default();
     let config = c.clone();
-    if c.turn.enabled {
-        turn::init_turn_server(c.turn, c.turn_auth).await?;
-    }
+    //if c.turn.enabled {
+    //    turn::init_turn_server(c.turn, c.turn_auth).await?;
+    //}
     let webrtc_config = Arc::new(WebRTCTransportConfig::new(&config).await?);
     // Accept new connections
     let auth = Arc::new(auth);

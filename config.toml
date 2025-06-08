@@ -8,16 +8,16 @@ maxpackettrack = 500
 # Values from [0-127] where 0 is the loudest.
 # Audio levels are read from rtp extension header according to:
 # https://tools.ietf.org/html/rfc6464
-audiolevelthreshold = 40
+audiolevelthreshold = 65
 # Sets the interval in which the SFU will check the audio level
 # in [ms]. If the active speaker has changed, the sfu will
 # emit an event to clients.
-audiolevelinterval=1000
+audiolevelinterval=500
 # Sets minimum percentage of events required to fire an audio level
 # according to the expected events from the audiolevelinterval,
 # calculated as audiolevelinterval/packetization time (20ms for 8kHz)
 # Values from [0-100]
-audiolevelfilter = 20
+audiolevelfilter = 50
 withstats = false
 
 [router.simulcast]

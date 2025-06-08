@@ -19,7 +19,7 @@ use webrtc::{
 
 use serde::Serialize;
 
-use crate::{track::{audio_observer::AudioObserver, router::LocalRouter}};
+use crate::{rtc::config::RouterConfig, track::{audio_observer::AudioObserver, router::LocalRouter}};
 
 use super::peer::Peer;
 
@@ -85,8 +85,12 @@ lazy_static! {
 
 impl Room {
     /// Create a new Room and initialise internal channels and maps
-    fn new(id: String) -> Arc<Self> {
+    fn new(id: String, router_config: &RouterConfig) -> Arc<Self> {
         let (sender, _dropped) = channel(10);
+        let audio_threshold = router_config.audio_level_threshold;
+        let audio_interval = router_config.audio_level_interval;
+        let audio_filter = router_config.audio_level_filter;
+        let audio_observer = AudioObserver::new(audio_threshold, audio_interval, audio_filter);
 
         Arc::new(Room {
             closed: Default::default(),
@@ -96,7 +100,7 @@ impl Room {
             signalers: Default::default(),
             labels: Default::default(),
             peers: Default::default(),
-            audio_observer: Arc::new(Mutex::new(AudioObserver::new(65, 600, 50))),
+            audio_observer: Arc::new(Mutex::new(audio_observer)),
             user_tracks: Default::default(),
             tracks: Default::default(),
         })
@@ -234,13 +238,16 @@ impl Room {
     }
 
     /// Get or create a Room by its ID
-    pub fn get(id: &str) -> Arc<Room> {
-        if let Some(room) = ROOMS.get(id) {
-            room.clone()
-        } else {
-            let room: Arc<Room> = Room::new(id.to_owned());
-            ROOMS.insert(id.to_string(), room.clone());
+    pub fn get(id: &str) -> Option<Arc<Room>> {
+        ROOMS.get(id).map(|room| room.clone())
+    }
 
+    pub fn get_or_create(id: &str, router_config: &RouterConfig) -> Arc<Room> {
+        if let Some(room) = Self::get(id) {
+            room
+        } else {
+            let room: Arc<Room> = Room::new(id.to_owned(), router_config);
+            ROOMS.insert(id.to_string(), room.clone());
             room
         }
     }
@@ -377,12 +384,14 @@ impl Room {
 
     async fn start_audio_observer_task(self: &Arc<Self>) {
         let observer = self.audio_observer.clone();
-        let mut interval = interval(Duration::from_millis(500));
+        let interval_ms = observer.lock().await.interval as u64;
+        let mut interval = interval(Duration::from_millis(interval_ms));
         let room_out = self.clone();
         tokio::spawn(async move {
             loop {
                 interval.tick().await;
-                let mut observer_in = observer.lock().await;
+                let observer_in = &mut observer.lock().await;
+                
                 let streams = observer_in.calc().await;
                 if let Some(streams) = streams {
                     info!("Streams {:?}", streams);
