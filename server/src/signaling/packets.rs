@@ -3,7 +3,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use volcano_sfu::rtc::{peer::JoinConfig, room::RoomInfo};
 use webrtc::{
-    ice_transport::ice_candidate::RTCIceCandidateInit,
+    ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
     peer_connection::sdp::session_description::RTCSessionDescription,
 };
 
@@ -102,6 +102,7 @@ pub enum PacketS2C {
     /// Accept authentication
     Accept {
         id: u32,
+        ice_servers: Vec<RTCIceServer>,
         available_rooms: Vec<RoomInfo>,
     },
     /// Answer (for client publisher)

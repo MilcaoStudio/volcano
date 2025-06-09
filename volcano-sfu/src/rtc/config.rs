@@ -10,7 +10,9 @@ use crate::{buffer::factory::AtomicFactory, track::error::ConfigError};
 #[derive(Clone, Deserialize)]
 struct ICEServerConfig {
     urls: Vec<String>,
-    user_name: String,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
     credential: String,
 }
 #[derive(Clone, Default, Deserialize)]
@@ -41,6 +43,7 @@ pub struct WebRTCConfig {
     ice_single_port: Option<i32>,
     #[serde(rename = "portrange")]
     pub ice_port_range: Option<Vec<u16>>,
+    #[serde(rename = "iceservers")]
     ice_servers: Option<Vec<ICEServerConfig>>,
     candidates: Candidates,
     #[serde(rename = "sdpsemantics")]
@@ -127,24 +130,21 @@ impl WebRTCTransportConfig {
         }
 
         
-        let mut ice_servers: Vec<RTCIceServer> = vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned(), "stun:stun1.l.google.com:19302".to_owned(), "stun:stun.12connect.com:3478".to_owned()],
-            ..Default::default()
-        }];
+        let mut ice_servers: Vec<RTCIceServer> = Vec::default();
+        let ice_lite = c.webrtc.candidates.ice_lite.unwrap_or_default();
+        se.set_lite(ice_lite);
 
-        if let Some(ice_lite) = c.webrtc.candidates.ice_lite {
-            if ice_lite {
-                se.set_lite(ice_lite);
-            } else if let Some(ice_servers_cfg) = &c.webrtc.ice_servers {
-                for ice_server in ice_servers_cfg {
-                    let s = RTCIceServer {
-                        urls: ice_server.urls.clone(),
-                        username: ice_server.user_name.clone(),
-                        credential: ice_server.credential.clone(),
-                    };
-
-                    ice_servers.push(s);
-                }
+        if !ice_lite {
+            if let Some(ice_servers_cfg) = &c.webrtc.ice_servers {
+                    for ice_server in ice_servers_cfg {
+                        let s = RTCIceServer {
+                            urls: ice_server.urls.clone(),
+                            username: ice_server.username.clone(),
+                            credential: ice_server.credential.clone(),
+                        };
+    
+                        ice_servers.push(s);
+                    }
             }
         }
 

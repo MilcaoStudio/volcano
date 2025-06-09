@@ -118,6 +118,7 @@ async fn handle_connection(
                         write
                             .send(PacketS2C::Accept {
                                 id,
+                                ice_servers: w.configuration.ice_servers.clone(),
                                 available_rooms,
                             })
                             .await?;
