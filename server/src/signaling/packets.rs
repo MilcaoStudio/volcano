@@ -102,6 +102,7 @@ pub enum PacketS2C {
     /// Accept authentication
     Accept {
         id: u32,
+        user_id: String,
         ice_servers: Vec<RTCIceServer>,
         available_rooms: Vec<RoomInfo>,
     },

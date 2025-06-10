@@ -108,6 +108,7 @@ async fn handle_connection(
                     if let Ok(user) = (auth)(token).await {
                         info!("Authenticated user {}", user.id);
 
+                        let user_id = user.id.clone();
                         // Create a new client
                         client = Some(Client::new(user, Arc::clone(&w)).await?);
 
@@ -118,6 +119,7 @@ async fn handle_connection(
                         write
                             .send(PacketS2C::Accept {
                                 id,
+                                user_id,
                                 ice_servers: w.configuration.ice_servers.clone(),
                                 available_rooms,
                             })
