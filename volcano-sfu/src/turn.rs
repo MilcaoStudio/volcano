@@ -8,10 +8,6 @@ use webrtc::util::vnet::net::*;
 pub const TURN_MIN_PORT: u16 = 32768;
 pub const TURN_MAX_PORT: u16 = 36863;
 
-// 4096 port range
-pub const ICE_MIN_PORT: u16 = 36864;
-pub const ICE_MAX_PORT: u16 = 40959;
-
 #[derive(Clone, Default, Deserialize)]
 pub(super) struct TurnAuth {
     #[serde(rename = "credentials")]

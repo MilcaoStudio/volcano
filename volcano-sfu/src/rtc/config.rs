@@ -4,8 +4,12 @@ use tokio::{net::UdpSocket, sync::Mutex};
 use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}, turn::auth::AuthHandler,};
 use anyhow::Result;
 
-use crate::turn::{self, TurnConfig};
+use crate::turn::TurnConfig;
 use crate::{buffer::factory::AtomicFactory, track::error::ConfigError};
+
+// 4096 port range
+pub const ICE_MIN_PORT: u16 = 36864;
+pub const ICE_MAX_PORT: u16 = 40959;
 
 #[derive(Clone, Deserialize)]
 struct ICEServerConfig {
@@ -112,8 +116,8 @@ impl WebRTCTransportConfig {
             let mut ice_port_end: u16 = 0;
 
             if c.turn.enabled && c.turn.port_range.is_none() {
-                ice_port_start = turn::ICE_MIN_PORT;
-                ice_port_end = turn::ICE_MAX_PORT;
+                ice_port_start = ICE_MIN_PORT;
+                ice_port_end = ICE_MAX_PORT;
             } else if let Some(ice_port_range) = &c.webrtc.ice_port_range {
                 if ice_port_range.len() == 2 {
                     ice_port_start = ice_port_range[0];
