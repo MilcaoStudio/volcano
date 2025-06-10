@@ -152,7 +152,7 @@ impl Client {
         let peer = self.peer.clone();
         match packet {
             PacketC2S::Answer { description } => peer.set_remote_description(description).await,
-            PacketC2S::Connect { .. } => Err(ServerError::AlreadyConnected.into()),
+            PacketC2S::Connect { .. } => write.send(PacketS2C::ServerError { error: ServerError::AlreadyConnected }).await,
             PacketC2S::Continue { .. } => {
                 // TODO: Add Continue event
                 Ok(())
