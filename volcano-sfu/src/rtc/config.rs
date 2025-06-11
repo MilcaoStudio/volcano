@@ -28,6 +28,7 @@ struct Candidates {
 }
 #[derive(Default)]
 pub struct WebRTCTransportConfig {
+    pub version: String,
     pub configuration: RTCConfiguration,
     pub setting: SettingEngine,
     pub router: RouterConfig,
@@ -190,6 +191,7 @@ impl WebRTCTransportConfig {
             setting: se,
             router: c.router.clone(),
             factory: Arc::new(Mutex::new(AtomicFactory::new(1000, 1000))),
+            version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
         if let Some(nat1toiips) = &c.webrtc.candidates.nat1_to_1ips {
@@ -203,8 +205,7 @@ impl WebRTCTransportConfig {
             w.setting
                 .set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
         }
-
-        info!("WebRTCTransport configuration finished");
+        
         Ok(w)
     }
 }

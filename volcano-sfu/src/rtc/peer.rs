@@ -149,11 +149,12 @@ impl Peer {
             ice_servers: self.config.configuration.ice_servers.clone(),
             ..Default::default()
         };
-        let config = WebRTCTransportConfig {
+        let peer_config = WebRTCTransportConfig {
             configuration: rtc_config_clone,
             setting: self.config.setting.clone(),
             router: self.config.router.clone(),
             factory: Arc::new(Mutex::new(AtomicFactory::new(1000, 1000))),
+            version: self.config.version.clone(),
         };
 
         if !cfg.no_subscribe {
@@ -242,7 +243,7 @@ impl Peer {
             let closed_out_1 = self.closed.clone();
 
             let publisher =
-                Arc::new(Publisher::new(self.user_id.clone(), room.clone(), config).await?);
+                Arc::new(Publisher::new(self.user_id.clone(), room.clone(), peer_config).await?);
 
             publisher.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
                 let on_ice_candidate_in = on_ice_candidate_out.clone();
