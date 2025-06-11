@@ -390,9 +390,19 @@ impl Room {
         tokio::spawn(async move {
             loop {
                 interval.tick().await;
-                let observer_in = &mut observer.lock().await;
+                let is_empty = {
+                    observer.lock().await.is_empty().await
+                };
                 
-                let streams = observer_in.calc().await;
+                if is_empty {
+                    continue;
+                }
+
+                let streams = {
+                    let mut observer = observer.lock().await;
+                    observer.calc().await
+                };
+
                 if let Some(streams) = streams {
                     info!("Streams {:?}", streams);
                     room_out.send_message(RoomEvent::VoiceActivity { room_id: room_out.id.clone(), stream_ids: streams }).await;
