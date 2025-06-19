@@ -8,10 +8,6 @@ use webrtc::util::vnet::net::*;
 pub const TURN_MIN_PORT: u16 = 32768;
 pub const TURN_MAX_PORT: u16 = 36863;
 
-// 4096 port range
-pub const ICE_MIN_PORT: u16 = 36864;
-pub const ICE_MAX_PORT: u16 = 40959;
-
 #[derive(Clone, Default, Deserialize)]
 pub(super) struct TurnAuth {
     #[serde(rename = "credentials")]
@@ -56,9 +52,10 @@ impl AuthHandler for CustomAuthHandler {
     ) -> Result<Vec<u8>, Error> {
         debug!("realm val: {}", realm);
         if let Some(val) = self.users_map.get(&username.to_string()) {
+            debug!("username accepted: {}", username);
             return Ok(val.clone());
         }
-        
+        error!("Invalid username");
         Err(Error::ErrNilConn)
     }
 }
@@ -68,7 +65,7 @@ pub async fn init_turn_server(
     auth: Option<Arc<dyn AuthHandler + Send + Sync>>,
 ) -> anyhow::Result<TurnServer> {
     let conn = Arc::new(UdpSocket::bind(conf.address.clone()).await?);
-    info!("UDP listening {}...", conn.local_addr()?);
+    info!("TURN server listening {}...", conn.local_addr()?);
 
     let mut new_auth: Option<Arc<dyn AuthHandler + Send + Sync>> = auth;
 
@@ -114,7 +111,7 @@ pub async fn init_turn_server(
         relay_addr_generator: Box::new(RelayAddressGeneratorRanges {
             min_port,
             max_port,
-            max_retries: 1,
+            max_retries: 20,
             relay_address: IpAddr::from_str(addr[0])?,
             address: "0.0.0.0".to_owned(),
             net: Arc::new(Net::new(Some(NetConfig::default()))),
@@ -129,5 +126,6 @@ pub async fn init_turn_server(
         alloc_close_notify: None,
     })
     .await?;
+    info!("TURN server started");
     Ok(turn_server)
 }

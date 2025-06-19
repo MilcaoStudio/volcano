@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::Mutex;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp::packet::Packet as RTCPacket;
@@ -26,8 +26,8 @@ use super::error::{Error, Result};
 use super::sequencer::PacketMeta;
 use super::{modify_vp8_temporal_payload, simulcast};
 
-pub type RtcpDataReceiver = UnboundedReceiver<Vec<Box<dyn RtcpPacket + Send + Sync>>>;
-pub type RtcpDataSender = UnboundedSender<Vec<Box<dyn RtcpPacket + Send + Sync>>>;
+pub type RtcpDataReceiver = mpsc::Receiver<Vec<Box<dyn RtcpPacket + Send + Sync>>>;
+pub type RtcpDataSender = mpsc::Sender<Vec<Box<dyn RtcpPacket + Send + Sync>>>;
 
 pub type OnCloseHandlerFn =
     Box<dyn (FnMut() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync>;
@@ -55,10 +55,10 @@ pub trait Receiver: Send + Sync {
         -> Result<()>;
     async fn delete_down_track(&self, layer: usize, id: String);
     async fn register_on_close(&self, f: OnCloseHandlerFn);
-    fn send_rtcp(&self, p: Vec<Box<dyn RtcpPacket + Send + Sync>>) -> Result<()>;
+    async fn send_rtcp(&self, p: Vec<Box<dyn RtcpPacket + Send + Sync>>) -> Result<()>;
     fn set_rtcp_channel(
         &mut self,
-        sender: Arc<UnboundedSender<Vec<Box<dyn RtcpPacket + Send + Sync>>>>,
+        sender: Arc<Sender<Vec<Box<dyn RtcpPacket + Send + Sync>>>>,
     );
     async fn get_sender_report_time(&self, layer: usize) -> (u32, u64);
     fn as_any(&self) -> &(dyn Any + Send + Sync);
@@ -93,7 +93,7 @@ pub struct WebRTCReceiver {
 
 impl WebRTCReceiver {
     pub async fn new(receiver: Arc<RTCRtpReceiver>, track: Arc<TrackRemote>, pid: String) -> Self {
-        let (s, _) = tokio::sync::mpsc::unbounded_channel();
+        let (s, _) = tokio::sync::mpsc::channel(1024);
         Self {
             peer_id: pid,
             receiver,
@@ -322,7 +322,7 @@ impl Receiver for WebRTCReceiver {
         *handler = Some(f);
     }
 
-    fn send_rtcp(&self, p: Vec<Box<dyn RtcpPacket + Send + Sync>>) -> Result<()> {
+    async fn send_rtcp(&self, p: Vec<Box<dyn RtcpPacket + Send + Sync>>) -> Result<()> {
         // Checks if first packet is PLI
         if let Some(packet) = p.get(0) {
             if packet.as_any().downcast_ref::<webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>().is_some() {
@@ -342,7 +342,7 @@ impl Receiver for WebRTCReceiver {
             }
         }
 
-        if self.rtcp_sender.send(p).is_err() {
+        if self.rtcp_sender.send(p).await.is_err() {
             return Err(Error::ErrChannelSend);
         }
 
@@ -351,7 +351,7 @@ impl Receiver for WebRTCReceiver {
 
     fn set_rtcp_channel(
         &mut self,
-        sender: Arc<UnboundedSender<Vec<Box<dyn RtcpPacket + Send + Sync>>>>,
+        sender: Arc<Sender<Vec<Box<dyn RtcpPacket + Send + Sync>>>>,
     ) {
         self.rtcp_sender = sender;
     }
@@ -458,7 +458,7 @@ impl Receiver for WebRTCReceiver {
                                 self.send_rtcp(vec![Box::new(PictureLossIndication {
                                     sender_ssrc,
                                     media_ssrc,
-                                })])?;
+                                })]).await?;
                             }
                         }
 

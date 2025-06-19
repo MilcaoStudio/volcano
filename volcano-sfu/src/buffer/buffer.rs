@@ -37,7 +37,7 @@ pub type OnFeedbackCallBackFn = Box<
 >;
 
 pub type OnAudioLevelFn =
-    Box<dyn (FnMut(u8) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync>;
+    Box<dyn (FnMut(bool, u8) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync>;
 pub enum BufferPacketType {
     RTPBufferPacket = 1,
     RTCPBufferPacket = 2,
@@ -510,7 +510,7 @@ impl AtomicBuffer {
                 if let Ok(data) = rv {
                     let mut handler = buffer.on_audio_level.lock().await;
                     if let Some(f) = &mut *handler {
-                        f(data.level).await;
+                        f(data.voice, data.level).await;
                     }
                 }
             }

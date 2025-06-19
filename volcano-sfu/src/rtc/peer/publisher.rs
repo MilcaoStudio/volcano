@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::future::Future;
 use std::sync::Arc;
@@ -121,6 +122,15 @@ impl Publisher {
     }
     
     pub async fn close(&self) {
+        let observer = self.room.audio_observer.lock().await;
+
+        // Remove publisher streams from audio observer
+        let tracks = &*self.tracks.lock().await;
+        let stream_ids: BTreeSet<String> = tracks.iter().map(|t| t.track.stream_id()).collect();
+        for stream_id in &stream_ids {
+            observer.remove_stream(stream_id).await;
+        }
+
         self.router.stop().await;
         if let Err(err) = self.pc.close().await {
             error!("close err: {}", err);
@@ -205,7 +215,7 @@ impl Publisher {
             if channel.label() == super::subscriber::API_CHANNEL_LABEL {
                 info!("[Publisher {id_in}] API data channel published from client!");
                 return Box::pin(async move {
-                    room_in.add_api_channel(&id_in).await;
+                    //room_in.add_api_channel(&id_in).await;
                 });
             }
             Box::pin(async move {

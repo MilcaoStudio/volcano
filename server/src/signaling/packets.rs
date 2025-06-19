@@ -2,7 +2,10 @@ use thiserror::Error;
 use tokio_tungstenite::tungstenite::Message;
 
 use volcano_sfu::rtc::{peer::JoinConfig, room::RoomInfo};
-use webrtc::{ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::sdp::session_description::RTCSessionDescription};
+use webrtc::{
+    ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
+    peer_connection::sdp::session_description::RTCSessionDescription,
+};
 
 /// Available types of media tracks
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -48,9 +51,7 @@ pub enum Negotiation {
 #[serde(tag = "type")]
 pub enum PacketC2S {
     /// Answer (from client subscriber)
-    Answer {
-        description: RTCSessionDescription,
-    },
+    Answer { description: RTCSessionDescription },
     /// Offer (from negotiation)
     Offer {
         id: u32,
@@ -101,7 +102,9 @@ pub enum PacketS2C {
     /// Accept authentication
     Accept {
         id: u32,
-        available_rooms: Vec<RoomInfo>
+        user_id: String,
+        ice_servers: Vec<RTCIceServer>,
+        available_rooms: Vec<RoomInfo>,
     },
     /// Answer (for client publisher)
     Answer {
@@ -114,6 +117,9 @@ pub enum PacketS2C {
         room_id: String,
         /// IDs of tracks that are no longer being produced
         removed_tracks: Vec<String>,
+    },
+    RoomInfo {
+        room: RoomInfo,
     },
     /// Offer (for client subscriber)
     Offer {
@@ -152,7 +158,13 @@ pub enum PacketS2C {
         user_id: String,
     },
     /// Disconnection error
-    Error { error: String },
+    Error {
+        error: String,
+    },
+    /// Custom server error
+    ServerError {
+        error: ServerError,
+    },
 }
 
 /// An error occurred on the server
@@ -166,14 +178,20 @@ pub enum ServerError {
     FailedToAuthenticate,
     #[error("Already connected to a room!")]
     AlreadyConnected,
+    #[error("Not authenticated in this session.")]
+    NotAuthenticated,
     #[error("Not connected to any room!")]
     NotConnected,
     #[error("Media type already has an existing track!")]
     MediaTypeSatisfied,
-    #[error("Request cannot be parsed.")]
-    NotDeserializable,
+    #[error("Peer connection failed!")]
+    PeerConnectionFailed,
+    #[error("Bad Request. Reason: {reason}")]
+    BadRequest { reason: String },
     #[error("Request type is unknown.")]
     UnknownRequest,
+    #[error("Received message is not a text.")]
+    UnproccesableEntity,
 }
 
 impl std::fmt::Display for MediaType {
@@ -189,18 +207,19 @@ impl std::fmt::Display for MediaType {
 
 impl PacketC2S {
     /// Create a packet from incoming Message
-    pub fn from(message: Message) -> Result<Self, ServerError> {
+    pub fn from(message: &Message) -> Result<Self, ServerError> {
         if let Message::Text(text) = message {
-            match serde_json::from_str(&text) {
+            match serde_json::from_str(text) {
                 Ok(packet) => Ok(packet),
                 Err(e) => {
-                    error!("Error: {e}");
                     error!("Tried to parse packet: {text}");
-                    Err(ServerError::UnknownRequest)
+                    let reason = e.to_string();
+                    error!("Error: {reason}");
+                    Err(ServerError::BadRequest { reason })
                 }
             }
         } else {
-            Err(ServerError::NotDeserializable)
+            Err(ServerError::UnproccesableEntity)
         }
     }
 }

@@ -19,7 +19,7 @@ const MIME_TYPE_VP9: &str = "video/vp9";
 const FRAME_MARKING: &str = "urn:ietf:params:rtp-hdrext:framemarking";
 
 /// Initialise a new RTCPeerConnection
-pub async fn create_subscriber_connection(cfg: Arc<WebRTCTransportConfig>) -> Result<Arc<RTCPeerConnection>> {
+pub async fn create_subscriber_connection(cfg: &Arc<WebRTCTransportConfig>) -> Result<Arc<RTCPeerConnection>> {
     // Create a MediaEngine object to configure the supported codec
     let mut m = MediaEngine::default();
     //m.register_default_codecs()?;

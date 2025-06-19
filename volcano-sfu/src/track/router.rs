@@ -1,25 +1,28 @@
-use std::{pin::Pin, sync::Arc};
 use std::future::Future;
+use std::{pin::Pin, sync::Arc};
 
 use dashmap::DashMap;
-use tokio::sync::mpsc;
-use tokio::sync::{mpsc::{UnboundedReceiver, UnboundedSender}, Mutex};
+use tokio::sync::broadcast::Sender;
+use tokio::sync::{broadcast, mpsc};
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
+use webrtc::error::Error as RTCError;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::rtcp::packet::Packet as RtcpPacket;
-use webrtc::error::Error as RTCError;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
 use webrtc::rtp_transceiver::{RTCPFeedback, RTCRtpTransceiverInit};
 use webrtc::track::track_remote::TrackRemote;
 
-use crate::rtc::peer::subscriber::Subscriber;
-use crate::rtc::room::Room;
-use crate::{buffer::factory::AtomicFactory, buffer::buffer::BufferIO, rtc::config::RouterConfig};
-use crate::buffer::buffer::Options as BufferOptions;
 use super::downtrack::{DownTrack, DownTrackInternal};
 use super::error::Result;
 use super::receiver::{Receiver, RtcpDataReceiver, RtcpDataSender, WebRTCReceiver};
+use crate::buffer::buffer::Options as BufferOptions;
+use crate::rtc::peer::subscriber::Subscriber;
+use crate::rtc::room::{Room, RoomEvent};
+use crate::track::audio_observer::AudioObserver;
+use crate::{buffer::buffer::BufferIO, buffer::factory::AtomicFactory, rtc::config::RouterConfig};
 
 pub type RtcpWriterFn = Box<
     dyn (FnMut(
@@ -44,11 +47,11 @@ pub type OnDelReciverTrackFn = Box<
 >;
 pub struct LocalRouter {
     id: String,
+    audio_observer: Arc<Mutex<AudioObserver>>,
     //twcc: Arc<Mutex<Option<Responder>>>,
     rtcp_sender_channel: Arc<RtcpDataSender>,
     rtcp_receiver_channel: Arc<Mutex<RtcpDataReceiver>>,
-    stop_sender_channel: Arc<Mutex<UnboundedSender<()>>>,
-    stop_receiver_channel: Arc<Mutex<UnboundedReceiver<()>>>,
+    stop_sender_channel: Arc<Sender<()>>,
     config: RouterConfig,
     receivers: Arc<Mutex<DashMap<String, Arc<dyn Receiver + Send + Sync>>>>,
     buffer_factory: AtomicFactory,
@@ -60,16 +63,20 @@ pub struct LocalRouter {
 
 impl LocalRouter {
     pub fn new(id: String, room: Arc<Room>, config: RouterConfig) -> Self {
-        let (s, r) = mpsc::unbounded_channel();
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (s, r) = mpsc::channel(1024);
+        let (sender, _) = broadcast::channel(1);
+        let audio_threshold = config.audio_level_threshold;
+        let audio_interval = config.audio_level_interval;
+        let audio_filter = config.audio_level_filter;
+        let audio_observer = AudioObserver::new(audio_threshold, audio_interval, audio_filter);
         Self {
             id,
             //twcc: Arc::new(Mutex::new(None)),
             //stats: Arc::new(Mutex::new(HashMap::new())),
+            audio_observer: Arc::new(Mutex::new(audio_observer)),
             rtcp_sender_channel: Arc::new(s),
             rtcp_receiver_channel: Arc::new(Mutex::new(r)),
-            stop_sender_channel: Arc::new(Mutex::new(sender)),
-            stop_receiver_channel: Arc::new(Mutex::new(receiver)),
+            stop_sender_channel: Arc::new(sender),
             config,
             receivers: Arc::new(Mutex::new(DashMap::new())),
             room,
@@ -80,7 +87,7 @@ impl LocalRouter {
         }
     }
 
-    /* 
+    /*
     fn get_receivers(&self) -> Arc<Mutex<DashMap<String, Arc<dyn Receiver + Send + Sync>>>> {
         self.receivers.clone()
     }*/
@@ -98,7 +105,11 @@ impl LocalRouter {
         self.id.clone()
     }
 
-    pub async fn add_down_track(&self, subscriber: Arc<Subscriber>, receiver: Arc<dyn Receiver>) -> Result<Option<Arc<DownTrack>>> {
+    pub async fn add_down_track(
+        &self,
+        subscriber: Arc<Subscriber>,
+        receiver: Arc<dyn Receiver>,
+    ) -> Result<Option<Arc<DownTrack>>> {
         let downtracks = subscriber.get_tracks(&receiver.stream_id()).await;
         // Checks for available tracks
         if let Some(downtracks_data) = downtracks {
@@ -112,7 +123,11 @@ impl LocalRouter {
         }
 
         let codec = receiver.codec();
-        subscriber.m.lock().await.register_codec(codec.clone(), receiver.kind())?;
+        subscriber
+            .m
+            .lock()
+            .await
+            .register_codec(codec.clone(), receiver.kind())?;
         let codec_capability = RTCRtpCodecCapability {
             mime_type: codec.capability.mime_type,
             clock_rate: codec.capability.clock_rate,
@@ -135,14 +150,22 @@ impl LocalRouter {
         };
 
         // New local down track
-        let down_track_local = Arc::new(DownTrackInternal::new(codec_capability, receiver.clone(), self.config.max_packet_track).await);
-        let transceiver =
-            subscriber.pc.add_transceiver_from_track(
+        let down_track_local = Arc::new(
+            DownTrackInternal::new(
+                codec_capability,
+                receiver.clone(),
+                self.config.max_packet_track,
+            )
+            .await,
+        );
+        let transceiver = subscriber
+            .pc
+            .add_transceiver_from_track(
                 down_track_local.clone(),
                 Some(RTCRtpTransceiverInit {
                     direction: RTCRtpTransceiverDirection::Sendonly,
                     send_encodings: Vec::new(),
-                })
+                }),
             )
             .await?;
         // New local track
@@ -154,67 +177,79 @@ impl LocalRouter {
         let s_out = subscriber.clone();
         let r_out = receiver.clone();
         let down_track_out = down_track_arc.clone();
-        down_track_arc.register_on_close(Box::new(move || {
-            let s_in = s_out.clone();
-            let r_in = r_out.clone();
-            let transceiver_in = transceiver.clone();
-            let down_track_in = down_track_out.clone();
-            Box::pin(async move {
-                if s_in.pc.connection_state() != RTCPeerConnectionState::Closed {
-                    // Remove track from subscriber peer connection
-                    let rv = s_in
-                        .pc
-                        .remove_track(&transceiver_in.sender().await)
-                        .await;
-                    match rv {
-                        Ok(_) => {
-                            info!("Remove DownTrack for {}", &r_in.stream_id());
-                            s_in.remove_down_track(&r_in.stream_id(), &down_track_in)
-                                .await;
-                            info!("RemoveDownTrack Negotiate");
-                            if let Err(err) = s_in.negotiate().await {
-                                error!("negotiate err:{} ", err);
+        down_track_arc
+            .register_on_close(Box::new(move || {
+                let s_in = s_out.clone();
+                let r_in = r_out.clone();
+                let transceiver_in = transceiver.clone();
+                let down_track_in = down_track_out.clone();
+                Box::pin(async move {
+                    if s_in.pc.connection_state() != RTCPeerConnectionState::Closed {
+                        // Remove track from subscriber peer connection
+                        let rv = s_in.pc.remove_track(&transceiver_in.sender().await).await;
+                        match rv {
+                            Ok(_) => {
+                                info!("Remove DownTrack for {}", &r_in.stream_id());
+                                s_in.remove_down_track(&r_in.stream_id(), &down_track_in)
+                                    .await;
+                                info!("RemoveDownTrack Negotiate");
+                                if let Err(err) = s_in.negotiate(None).await {
+                                    error!("negotiate err:{} ", err);
+                                }
                             }
-                        }
-                        Err(err) => {
-                            if err == RTCError::ErrConnectionClosed {
-                                // return;
+                            Err(err) => {
+                                if err == RTCError::ErrConnectionClosed {
+                                    // return;
+                                }
                             }
                         }
                     }
-                }
-            })}
-        )).await;
+                })
+            }))
+            .await;
 
         let s_out_1 = subscriber.clone();
         let r_out_1 = receiver.clone();
-        down_track_arc.register_on_bind(Box::new(move || {
-            let s_in = s_out_1.clone();
-            let r_in = r_out_1.clone();
+        down_track_arc
+            .register_on_bind(Box::new(move || {
+                let s_in = s_out_1.clone();
+                let r_in = r_out_1.clone();
 
-            Box::pin(async move {
-                tokio::spawn(async move {
-                    s_in.send_stream_down_track_reports(&r_in.stream_id()).await;
-                });
-            })
-        })).await;
+                Box::pin(async move {
+                    tokio::spawn(async move {
+                        s_in.send_stream_down_track_reports(&r_in.stream_id()).await;
+                    });
+                })
+            }))
+            .await;
 
-        subscriber.add_down_track(receiver.stream_id(), down_track_arc.clone()).await;
-        receiver.add_down_track(down_track_arc, self.config.simulcast.best_quality_first).await;
+        subscriber
+            .add_down_track(receiver.stream_id(), down_track_arc.clone())
+            .await;
+        receiver
+            .add_down_track(down_track_arc, self.config.simulcast.best_quality_first)
+            .await;
 
         Ok(None)
     }
 
-    pub async fn add_down_tracks(&self, subscriber: Arc<Subscriber>, r: Option<Arc<dyn Receiver>>,) -> Result<()> {
+    pub async fn add_down_tracks(
+        &self,
+        subscriber: Arc<Subscriber>,
+        r: Option<Arc<dyn Receiver>>,
+    ) -> Result<()> {
         if subscriber.no_auto_subscribe {
             info!("Skipping no auto subscribe");
             return Ok(());
         }
 
         if let Some(receiver) = r {
-            info!("Add actual downtrack to subscriber, subscriber: {}", subscriber.id);
+            info!(
+                "Add actual downtrack to subscriber, subscriber: {}",
+                subscriber.id
+            );
             self.add_down_track(subscriber.clone(), receiver).await?;
-            subscriber.negotiate().await?;
+            subscriber.negotiate(None).await?;
             return Ok(());
         }
 
@@ -231,43 +266,78 @@ impl LocalRouter {
             for val in recs {
                 self.add_down_track(subscriber.clone(), val.clone()).await?;
             }
-            subscriber.negotiate().await?;
+            subscriber.negotiate(None).await?;
         }
 
         Ok(())
     }
 
-    pub async fn add_receiver(&self, receiver: Arc<RTCRtpReceiver>, track: Arc<TrackRemote>, track_id: String, stream_id: String) -> (Arc<dyn Receiver>, bool) {
-        info!("add_receiver -> track {}, stream: {}", track.id(), stream_id);
+    pub async fn add_receiver(
+        self: &Arc<Self>,
+        receiver: Arc<RTCRtpReceiver>,
+        track: Arc<TrackRemote>,
+        track_id: String,
+        stream_id: String,
+    ) -> (Arc<dyn Receiver>, bool) {
+        info!(
+            "add_receiver -> track {}, stream: {}",
+            track.id(),
+            stream_id
+        );
         let mut published = false;
         let buffer = self.buffer_factory.get_or_new_buffer(track.ssrc()).await;
         let sender = self.rtcp_sender_channel.clone();
-        buffer.register_on_feedback(Box::new(move |packets: Vec<Box<dyn RtcpPacket + Send + Sync>>| {
-            let sender_in = Arc::clone(&sender);
-            Box::pin(async move {
-                if let Err(err) = sender_in.send(packets) {
-                    error!("send err: {}", err);
-                }
-            })
-        })).await;
+        buffer
+            .register_on_feedback(Box::new(
+                move |packets: Vec<Box<dyn RtcpPacket + Send + Sync>>| {
+                    let sender_in = Arc::clone(&sender);
+                    Box::pin(async move {
+                        if let Err(err) = sender_in.send(packets).await {
+                            error!("send err: {}", err);
+                        }
+                    })
+                },
+            ))
+            .await;
 
         match track.kind() {
             RTPCodecType::Audio => {
-                let room_out = self.room.clone();
+                let router_out = self.clone();
                 let stream_id_out = stream_id.clone();
-                buffer.register_on_audio_level(Box::new(move |level| {
-                    let room_in = room_out.clone();
-                    let stream_id_in = stream_id_out.clone();
-                    Box::pin(async move {
-                        room_in.audio_observer.lock().await.observe(&stream_id_in, level).await;
-                    })
-                })).await;
-                self.room.audio_observer.lock().await.add_stream(stream_id).await;
-            },
+                buffer
+                    .register_on_audio_level(Box::new(move |voice, level| {
+                        let router_in = router_out.clone();
+                        let stream_id_in = stream_id_out.clone();
+                        Box::pin(async move {
+                            if !voice {
+                                debug!("Skip observation");
+                                return;
+                            }
+                            router_in
+                                .audio_observer
+                                .lock()
+                                .await
+                                .observe(&stream_id_in, level)
+                                .await;
+                        })
+                    }))
+                    .await;
+                debug!(
+                    "[Room {}] add stream {} to audio observer",
+                    self.room.id, stream_id
+                );
+                let router_2 = self.clone();
+                router_2
+                    .audio_observer
+                    .lock()
+                    .await
+                    .add_stream(stream_id)
+                    .await;
+            }
             RTPCodecType::Video => {
                 debug!("Video tracking not implemented");
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
         // TODO: implement twcc
@@ -280,13 +350,16 @@ impl LocalRouter {
         //let stats_out = Arc::clone(&self.stats);
         let buffer_out = Arc::clone(&buffer);
         let with_status = self.config.with_stats;
-        rtcp_reader.lock().await.register_on_packet(Box::new(move |packet: Vec<u8>| {
-            let buffer_in = Arc::clone(&buffer_out);
-            Box::pin(async move {
-                let mut buf = &packet[..];
-                let pkts_result = webrtc::rtcp::packet::unmarshal(&mut buf)?;
-                for pkt in pkts_result {
-                    if let Some(description) =
+        rtcp_reader
+            .lock()
+            .await
+            .register_on_packet(Box::new(move |packet: Vec<u8>| {
+                let buffer_in = Arc::clone(&buffer_out);
+                Box::pin(async move {
+                    let mut buf = &packet[..];
+                    let pkts_result = webrtc::rtcp::packet::unmarshal(&mut buf)?;
+                    for pkt in pkts_result {
+                        if let Some(description) =
                         pkt.as_any()
                             .downcast_ref::<webrtc::rtcp::source_description::SourceDescription>()
                     {
@@ -308,16 +381,18 @@ impl LocalRouter {
                             // TODO: update stats
                         }
                     }
-                }
-                Ok(())
-            })
-        })).await;
+                    }
+                    Ok(())
+                })
+            }))
+            .await;
         let receivers = self.receivers.lock().await;
         let result_receiver;
         match receivers.get(&track.id()) {
-            Some(r)=>result_receiver = r.clone(),
-            None=>{
-                let mut rv = WebRTCReceiver::new(receiver.clone(), track.clone(), self.id.clone()).await;
+            Some(r) => result_receiver = r.clone(),
+            None => {
+                let mut rv =
+                    WebRTCReceiver::new(receiver.clone(), track.clone(), self.id.clone()).await;
                 rv.set_rtcp_channel(self.rtcp_sender_channel.clone());
                 let recv_kind = rv.kind();
                 let room_out = self.room.clone();
@@ -327,13 +402,16 @@ impl LocalRouter {
                     let stream_id_in = stream_id.clone();
                     Box::pin(async move {
                         if recv_kind == RTPCodecType::Audio {
-                                room_in.audio_observer
-                                    .lock().await
-                                    .remove_stream(&stream_id_in).await;
-                            }
+                            room_in
+                                .audio_observer
+                                .lock()
+                                .await
+                                .remove_stream(&stream_id_in)
+                                .await;
                         }
-                    )
-                })).await;
+                    })
+                }))
+                .await;
                 result_receiver = Arc::new(rv);
                 receivers.insert(track_id, result_receiver.clone());
                 published = true;
@@ -367,7 +445,7 @@ impl LocalRouter {
         let buffer_clone = buffer.clone();
         tokio::spawn(async move {
             let mut b = vec![0u8; 1500];
-            
+
             while let Ok((pkt, _)) = track.read(&mut b).await {
                 if let Err(err) = buffer_clone.write(pkt).await {
                     error!("write error: {}", err);
@@ -379,14 +457,54 @@ impl LocalRouter {
         (result_receiver, published)
     }
 
+    pub async fn start_audio_observer_task(&self) {
+        let mut stop_receiver = self.stop_sender_channel.subscribe();
+        let id_out = self.id.clone();
+        let observer = self.audio_observer.clone();
+        let interval_ms = observer.lock().await.interval as u64;
+        let interval = Duration::from_millis(interval_ms);
+        let room_out = self.room.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = sleep(interval) => {
+                        let is_empty = {
+                            observer.lock().await.is_empty().await
+                        };
+
+                        if is_empty {
+                            info!("Continue");
+                            continue;
+                        }
+
+                        let streams = {
+                            observer.lock().await.calc().await
+                        };
+
+                        if let Some(streams) = streams {
+                            info!("Streams {:?}", streams);
+                            room_out.send_message(RoomEvent::VoiceActivity { room_id: room_out.id.clone(), stream_ids: streams }).await;
+                        }
+                    }
+                    _ = stop_receiver.recv() => {
+                        info!("[Router {}] Stopping audio observer task", id_out);
+                        break;
+                    }
+                }
+            }
+        });
+        info!("Audio observer task started");
+    }
+
     pub async fn set_rtcp_writer(&self, writer: RtcpWriterFn) {
         let mut handler = self.rtcp_writer_handler.lock().await;
         *handler = Some(writer);
     }
     pub async fn send_rtcp(&self) {
+        let mut stop = self.stop_sender_channel.subscribe();
+        let mut rtcp_receiver = self.rtcp_receiver_channel.lock().await;
         loop {
-            let mut rtcp_receiver = self.rtcp_receiver_channel.lock().await;
-            let mut stop_receiver = self.stop_receiver_channel.lock().await;
+            //let mut rtcp_receiver = self.rtcp_receiver_channel.lock().await;
             tokio::select! {
               data = rtcp_receiver.recv() => {
                  if let Some(val) = data{
@@ -395,7 +513,7 @@ impl LocalRouter {
                     }
                 }
               }
-              _data = stop_receiver.recv() => {
+              _data = stop.recv() => {
                 info!("Stop receiver signal. Exiting loop");
                 return ;
               }
@@ -403,7 +521,7 @@ impl LocalRouter {
         }
     }
     pub async fn stop(&self) {
-        if let Err(err) = self.stop_sender_channel.lock().await.send(()) {
+        if let Err(err) = self.stop_sender_channel.send(()) {
             error!("stop err: {}", err);
         }
     }

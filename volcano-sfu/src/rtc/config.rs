@@ -4,13 +4,19 @@ use tokio::{net::UdpSocket, sync::Mutex};
 use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}, turn::auth::AuthHandler,};
 use anyhow::Result;
 
-use crate::turn::{self, TurnConfig};
+use crate::turn::TurnConfig;
 use crate::{buffer::factory::AtomicFactory, track::error::ConfigError};
+
+// 4096 port range
+pub const ICE_MIN_PORT: u16 = 36864;
+pub const ICE_MAX_PORT: u16 = 40959;
 
 #[derive(Clone, Deserialize)]
 struct ICEServerConfig {
     urls: Vec<String>,
-    user_name: String,
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
     credential: String,
 }
 #[derive(Clone, Default, Deserialize)]
@@ -22,6 +28,7 @@ struct Candidates {
 }
 #[derive(Default)]
 pub struct WebRTCTransportConfig {
+    pub version: String,
     pub configuration: RTCConfiguration,
     pub setting: SettingEngine,
     pub router: RouterConfig,
@@ -41,6 +48,7 @@ pub struct WebRTCConfig {
     ice_single_port: Option<i32>,
     #[serde(rename = "portrange")]
     pub ice_port_range: Option<Vec<u16>>,
+    #[serde(rename = "iceservers")]
     ice_servers: Option<Vec<ICEServerConfig>>,
     candidates: Candidates,
     #[serde(rename = "sdpsemantics")]
@@ -67,11 +75,9 @@ pub struct RouterConfig {
     #[serde(rename = "audiolevelinterval")]
     pub audio_level_interval: i32,
     #[serde(rename = "audiolevelthreshold")]
-    #[allow(dead_code)]
-    audio_level_threshold: u8,
+    pub audio_level_threshold: u8,
     #[serde(rename = "audiolevelfilter")]
-    #[allow(dead_code)]
-    audio_level_filter: i32,
+    pub audio_level_filter: i32,
     pub simulcast: SimulcastConfig,
 }
 
@@ -111,8 +117,8 @@ impl WebRTCTransportConfig {
             let mut ice_port_end: u16 = 0;
 
             if c.turn.enabled && c.turn.port_range.is_none() {
-                ice_port_start = turn::ICE_MIN_PORT;
-                ice_port_end = turn::ICE_MAX_PORT;
+                ice_port_start = ICE_MIN_PORT;
+                ice_port_end = ICE_MAX_PORT;
             } else if let Some(ice_port_range) = &c.webrtc.ice_port_range {
                 if ice_port_range.len() == 2 {
                     ice_port_start = ice_port_range[0];
@@ -129,24 +135,21 @@ impl WebRTCTransportConfig {
         }
 
         
-        let mut ice_servers: Vec<RTCIceServer> = vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned(), "stun:stun1.l.google.com:19302".to_owned(), "stun:stun.12connect.com:3478".to_owned()],
-            ..Default::default()
-        }];
+        let mut ice_servers: Vec<RTCIceServer> = Vec::default();
+        let ice_lite = c.webrtc.candidates.ice_lite.unwrap_or_default();
+        se.set_lite(ice_lite);
 
-        if let Some(ice_lite) = c.webrtc.candidates.ice_lite {
-            if ice_lite {
-                se.set_lite(ice_lite);
-            } else if let Some(ice_servers_cfg) = &c.webrtc.ice_servers {
-                for ice_server in ice_servers_cfg {
-                    let s = RTCIceServer {
-                        urls: ice_server.urls.clone(),
-                        username: ice_server.user_name.clone(),
-                        credential: ice_server.credential.clone(),
-                    };
-
-                    ice_servers.push(s);
-                }
+        if !ice_lite {
+            if let Some(ice_servers_cfg) = &c.webrtc.ice_servers {
+                    for ice_server in ice_servers_cfg {
+                        let s = RTCIceServer {
+                            urls: ice_server.urls.clone(),
+                            username: ice_server.username.clone(),
+                            credential: ice_server.credential.clone(),
+                        };
+    
+                        ice_servers.push(s);
+                    }
             }
         }
 
@@ -188,6 +191,7 @@ impl WebRTCTransportConfig {
             setting: se,
             router: c.router.clone(),
             factory: Arc::new(Mutex::new(AtomicFactory::new(1000, 1000))),
+            version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
         if let Some(nat1toiips) = &c.webrtc.candidates.nat1_to_1ips {
@@ -201,8 +205,7 @@ impl WebRTCTransportConfig {
             w.setting
                 .set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
         }
-
-        info!("WebRTCTransport configuration finished");
+        
         Ok(w)
     }
 }

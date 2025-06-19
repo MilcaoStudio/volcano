@@ -1,14 +1,11 @@
 use anyhow::Result;
 use futures::{Future, StreamExt};
-use std::{fs, pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
-use volcano_sfu::{
-    rtc::{
-        config::{self, WebRTCTransportConfig},
+use volcano_sfu::rtc::{
+        config::{Config, WebRTCTransportConfig},
         room::Room,
-    },
-    turn,
-};
+    };
 
 use super::{
     client::Client,
@@ -39,22 +36,18 @@ type AuthFn = Box<
 >;
 
 /// Launch a new signaling server
-pub async fn launch<A: ToSocketAddrs>(addr: A, auth: AuthFn) -> Result<()> {
+pub async fn launch<A: ToSocketAddrs>(addr: A, config: Config, auth: AuthFn) -> Result<()> {
     // Create TCP listener
     let try_socket = TcpListener::bind(addr).await;
     let listener = try_socket.expect("Failed to bind");
 
     info!("Server listening on {}", listener.local_addr().unwrap());
-
-    let content = fs::read_to_string("./config.toml")?;
-    let c = config::load(&content)
-        .inspect_err(|e| error!("Error loading config: {e}. Loading default config."))
-        .unwrap_or_default();
-    let config = c.clone();
-    if c.turn.enabled {
-        turn::init_turn_server(c.turn, c.turn_auth).await?;
-    }
+    
+    //if c.turn.enabled {
+    //    turn::init_turn_server(c.turn, c.turn_auth).await?;
+    //}
     let webrtc_config = Arc::new(WebRTCTransportConfig::new(&config).await?);
+    info!("WebRTC configuration for SFU v{} loaded!", webrtc_config.version);
     // Accept new connections
     let auth = Arc::new(auth);
     while let Ok((stream, _)) = listener.accept().await {
@@ -86,12 +79,7 @@ async fn accept_connection(stream: TcpStream, auth: Arc<AuthFn>, w: Arc<WebRTCTr
 
     // Handle any resulting errors
     if let Err(error) = handle_connection((read, write.clone()), auth, w).await {
-        write
-            .send(PacketS2C::Error {
-                error: error.to_string(),
-            })
-            .await
-            .ok();
+        error!("Connection ended with error: {error}");
     }
 }
 
@@ -104,7 +92,7 @@ async fn handle_connection(
     // Wait until valid packet is sent
     let mut client: Option<Client> = None;
     while let Some(msg) = read.next().await {
-        match PacketC2S::from(msg?) {
+        match PacketC2S::from(&msg?) {
             Ok(packet) => match packet {
                 PacketC2S::Connect {
                     id,
@@ -114,6 +102,7 @@ async fn handle_connection(
                     if let Ok(user) = (auth)(token).await {
                         info!("Authenticated user {}", user.id);
 
+                        let user_id = user.id.clone();
                         // Create a new client
                         client = Some(Client::new(user, Arc::clone(&w)).await?);
 
@@ -124,16 +113,24 @@ async fn handle_connection(
                         write
                             .send(PacketS2C::Accept {
                                 id,
+                                user_id,
+                                ice_servers: w.configuration.ice_servers.clone(),
                                 available_rooms,
                             })
                             .await?;
                     }
                     break;
                 }
-                _ => {}
+                _ => {
+                    write
+                        .send(PacketS2C::ServerError {
+                            error: ServerError::NotAuthenticated,
+                        })
+                        .await?;
+                }
             },
             Err(e) => {
-                error!("Error: {e}");
+                write.send(PacketS2C::ServerError { error: e }).await?;
             }
         }
     }
