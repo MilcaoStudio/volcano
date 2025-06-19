@@ -15,7 +15,7 @@ RUN cargo install --locked --path server --root /usr/local
 # Bundle
 FROM gcr.io/distroless/cc-debian12
 COPY --from=build /usr/local/bin/server /etc/volcano/volcano-server
-COPY server/config.toml /etc/volcano/config.toml
+COPY config.toml /etc/volcano/config.toml
 
 # Signaling server port
 EXPOSE 4000/tcp
