@@ -223,7 +223,7 @@ impl DownTrackInternal {
         }
 
         if !fwd_pkts.is_empty() {
-            if let Err(err) = receiver.send_rtcp(fwd_pkts) {
+            if let Err(err) = receiver.send_rtcp(fwd_pkts).await {
                 log::error!("send_rtcp err:{}", err);
             }
         }
@@ -658,7 +658,7 @@ impl DownTrack {
                         receiver.send_rtcp(vec![Box::new(PictureLossIndication {
                             sender_ssrc: ssrc,
                             media_ssrc,
-                        })])?;
+                        })]).await?;
 
                         return Ok(());
                     }
@@ -742,7 +742,7 @@ impl DownTrack {
                     receiver.send_rtcp(vec![Box::new(PictureLossIndication {
                         sender_ssrc: ssrc,
                         media_ssrc: ext_packet.packet.header.ssrc,
-                    })])?;
+                    })]).await?;
                     return Ok(());
                 }
 

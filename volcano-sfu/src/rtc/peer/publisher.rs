@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::future::Future;
 use std::sync::Arc;
@@ -121,6 +122,15 @@ impl Publisher {
     }
     
     pub async fn close(&self) {
+        let observer = self.room.audio_observer.lock().await;
+
+        // Remove publisher streams from audio observer
+        let tracks = &*self.tracks.lock().await;
+        let stream_ids: BTreeSet<String> = tracks.iter().map(|t| t.track.stream_id()).collect();
+        for stream_id in &stream_ids {
+            observer.remove_stream(stream_id).await;
+        }
+
         self.router.stop().await;
         if let Err(err) = self.pc.close().await {
             error!("close err: {}", err);

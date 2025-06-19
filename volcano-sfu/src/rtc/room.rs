@@ -8,7 +8,7 @@ use postage::{
     broadcast::{channel, Receiver, Sender},
     sink::Sink,
 };
-use tokio::{sync::Mutex, time::{interval, Duration}};
+use tokio::sync::Mutex;
 use ulid::Ulid;
 use webrtc::{
     data::data_channel::DataChannel, data_channel::{
@@ -382,36 +382,6 @@ impl Room {
         return RoomInfo { id: self.id.clone(), users };
     }
 
-    async fn start_audio_observer_task(self: &Arc<Self>) {
-        let observer = self.audio_observer.clone();
-        let interval_ms = observer.lock().await.interval as u64;
-        let mut interval = interval(Duration::from_millis(interval_ms));
-        let room_out = self.clone();
-        tokio::spawn(async move {
-            loop {
-                interval.tick().await;
-                let is_empty = {
-                    observer.lock().await.is_empty().await
-                };
-                
-                if is_empty {
-                    continue;
-                }
-
-                let streams = {
-                    let mut observer = observer.lock().await;
-                    observer.calc().await
-                };
-
-                if let Some(streams) = streams {
-                    info!("Streams {:?}", streams);
-                    room_out.send_message(RoomEvent::VoiceActivity { room_id: room_out.id.clone(), stream_ids: streams }).await;
-                }
-            }
-        });
-        info!("Audio observer task started");
-    }
-
     pub async fn subscribe(self: &Arc<Self>, peer: Arc<Peer>) {
         info!("Subscribing a new peer");
 
@@ -433,6 +403,10 @@ impl Room {
                     _ => continue,
                 }
             }
+        }
+
+        if let Some(publisher) = peer.publisher().await {
+            publisher.router().start_audio_observer_task().await;
         }
 
         for cur_peer in self.peers.iter() {
@@ -466,9 +440,6 @@ impl Room {
 
         // Offer API data channel to client subscriber
         self.add_api_channel(&peer.id()).await;
-
-        // Start audio observer task
-        self.start_audio_observer_task().await;
     }
     /// Remove a user from the room
     pub async fn remove_user(&self, id: &str) {

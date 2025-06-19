@@ -49,7 +49,7 @@ impl AudioObserver {
         })
     }
 
-    pub async fn remove_stream(&mut self, stream_id: &str) {
+    pub async fn remove_stream(&self, stream_id: &str) {
         debug!("Remove stream {}", stream_id);
         let mut streams = self.streams.lock().await;
         streams.retain(|stream| !stream.id.eq(stream_id));
@@ -91,6 +91,8 @@ impl AudioObserver {
             if stream.total >= self.expected {
                 debug!("[stream {}] {}/{} (acceptable)", stream.id, stream.total, self.expected);
                 stream_ids.push(stream.id.clone());
+            } else {
+                debug!("[stream {}] {}/{} (not acceptable)", stream.id, stream.total, self.expected);
             }
 
             stream.total = 0;
