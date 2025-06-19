@@ -29,3 +29,4 @@ webrtc = "0.13.0"
 anyhow = "1.0.82"
 postage = "0.5.0"
 volcano-sfu = {path = "../volcano-sfu"}
+clap = { version = "4.5.40", features = ["derive"] }

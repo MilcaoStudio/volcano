@@ -1,13 +1,11 @@
 use anyhow::Result;
 use futures::{Future, StreamExt};
-use std::{fs, pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
-use volcano_sfu::{
-    rtc::{
-        config::{self, WebRTCTransportConfig},
+use volcano_sfu::rtc::{
+        config::{Config, WebRTCTransportConfig},
         room::Room,
-    },
-};
+    };
 
 use super::{
     client::Client,
@@ -38,18 +36,13 @@ type AuthFn = Box<
 >;
 
 /// Launch a new signaling server
-pub async fn launch<A: ToSocketAddrs>(addr: A, auth: AuthFn) -> Result<()> {
+pub async fn launch<A: ToSocketAddrs>(addr: A, config: Config, auth: AuthFn) -> Result<()> {
     // Create TCP listener
     let try_socket = TcpListener::bind(addr).await;
     let listener = try_socket.expect("Failed to bind");
 
     info!("Server listening on {}", listener.local_addr().unwrap());
-
-    let content = fs::read_to_string("./config.toml")?;
-    let c = config::load(&content)
-        .inspect_err(|e| error!("Error loading config: {e}. Loading default config."))
-        .unwrap_or_default();
-    let config = c.clone();
+    
     //if c.turn.enabled {
     //    turn::init_turn_server(c.turn, c.turn_auth).await?;
     //}
