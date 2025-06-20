@@ -45,7 +45,7 @@ portrange = [5000, 5200]
 # if sfu behind nat, set iceserver
 [[webrtc.iceservers]]
 urls = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
-[[webrtc.iceservers]]
+# [[webrtc.iceservers]]
 # urls = ["turn:turn.awsome.org:3478"]
 # username = "awsome"
 # credential = "awsome"
