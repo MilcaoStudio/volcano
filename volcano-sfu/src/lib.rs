@@ -9,6 +9,8 @@ extern crate log;
 
 pub mod buffer;
 pub mod rtc;
-pub mod turn;
 pub mod track;
 pub mod stats;
+
+#[cfg(feature = "turn")]
+pub mod turn;

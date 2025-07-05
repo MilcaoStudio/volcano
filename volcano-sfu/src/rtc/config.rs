@@ -1,11 +1,15 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::{net::UdpSocket, sync::Mutex};
-use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}, turn::auth::AuthHandler,};
+use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}};
 use anyhow::Result;
 
-use crate::turn::TurnConfig;
 use crate::{buffer::factory::AtomicFactory, track::error::ConfigError};
+
+#[cfg(feature = "turn")]
+use crate::turn::TurnConfig;
+#[cfg(feature = "turn")]
+use webrtc::turn::auth::AuthHandler;
 
 // 4096 port range
 pub const ICE_MIN_PORT: u16 = 36864;
@@ -81,11 +85,18 @@ pub struct RouterConfig {
     pub simulcast: SimulcastConfig,
 }
 
+#[cfg(not(feature = "turn"))]
+#[derive(Deserialize, Clone, Default)]
+pub struct TurnConfig {
+    pub enabled: bool,
+}
+
 #[derive(Clone, Default, Deserialize)]
 pub struct Config {
     router: RouterConfig,
     pub webrtc: WebRTCConfig,
     pub turn: TurnConfig,
+    #[cfg(feature = "turn")]
     #[serde(skip_deserializing)]
     pub turn_auth: Option<Arc<dyn AuthHandler + Send + Sync>>,
 }
@@ -116,10 +127,18 @@ impl WebRTCTransportConfig {
             let mut ice_port_start: u16 = 0;
             let mut ice_port_end: u16 = 0;
 
+            #[cfg(not(feature = "turn"))]
+            if c.turn.enabled {
+                error!("`turn` feature is not enabled for this crate. Turn server will not be started.");
+            }
+
+            #[cfg(feature = "turn")]
             if c.turn.enabled && c.turn.port_range.is_none() {
                 ice_port_start = ICE_MIN_PORT;
                 ice_port_end = ICE_MAX_PORT;
-            } else if let Some(ice_port_range) = &c.webrtc.ice_port_range {
+            }
+            
+            if let Some(ice_port_range) = &c.webrtc.ice_port_range {
                 if ice_port_range.len() == 2 {
                     ice_port_start = ice_port_range[0];
                     ice_port_end = ice_port_range[1];
