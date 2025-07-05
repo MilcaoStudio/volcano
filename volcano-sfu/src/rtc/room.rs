@@ -79,13 +79,9 @@ pub struct Room {
     tracks: DashMap<String, Arc<TrackLocalStaticRTP>>,
 }
 
-lazy_static! {
-    static ref ROOMS: DashMap<String, Arc<Room>> = DashMap::new();
-}
-
 impl Room {
     /// Create a new Room and initialise internal channels and maps
-    fn new(id: String, router_config: &RouterConfig) -> Arc<Self> {
+    pub fn new(id: String, router_config: &RouterConfig) -> Arc<Self> {
         let (sender, _dropped) = channel(10);
         let audio_threshold = router_config.audio_level_threshold;
         let audio_interval = router_config.audio_level_interval;
@@ -237,30 +233,7 @@ impl Room {
         self.signalers.lock().await.clear();
     }
 
-    /// Get or create a Room by its ID
-    pub fn get(id: &str) -> Option<Arc<Room>> {
-        ROOMS.get(id).map(|room| room.clone())
-    }
-
-    pub fn get_or_create(id: &str, router_config: &RouterConfig) -> Arc<Room> {
-        if let Some(room) = Self::get(id) {
-            room
-        } else {
-            let room: Arc<Room> = Room::new(id.to_owned(), router_config);
-            ROOMS.insert(id.to_string(), room.clone());
-            room
-        }
-    }
-
-    pub fn fetch_rooms(ids: &Vec<String>) -> Vec<RoomInfo> {
-        let mut available_rooms = Vec::new();
-        for id in ids {
-            if let Some(room) = ROOMS.get(id) {
-                available_rooms.push(room.get_room_info())
-            }
-        }
-        available_rooms
-    }
+    
 
     pub(super) fn get_data_channel_middlewares(&self) -> Arc<Vec<Arc<DataChannel>>> {
         self.data_channels.clone()

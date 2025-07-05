@@ -3,9 +3,10 @@ use futures::{Future, StreamExt};
 use std::{pin::Pin, sync::Arc};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use volcano_sfu::rtc::{
-        config::{Config, WebRTCTransportConfig},
-        room::Room,
+        config::{Config, WebRTCTransportConfig}
     };
+
+use crate::reference::ReferenceDb;
 
 use super::{
     client::Client,
@@ -50,11 +51,14 @@ pub async fn launch<A: ToSocketAddrs>(addr: A, config: Config, auth: AuthFn) -> 
     info!("WebRTC configuration for SFU v{} loaded!", webrtc_config.version);
     // Accept new connections
     let auth = Arc::new(auth);
+    // Create reference db
+    let db = Arc::new(ReferenceDb::default());
     while let Ok((stream, _)) = listener.accept().await {
         tokio::spawn(accept_connection(
             stream,
             auth.clone(),
             Arc::clone(&webrtc_config),
+            Arc::clone(&db),
         ));
     }
 
@@ -62,7 +66,7 @@ pub async fn launch<A: ToSocketAddrs>(addr: A, config: Config, auth: AuthFn) -> 
 }
 
 /// Accept a new TCP connection
-async fn accept_connection(stream: TcpStream, auth: Arc<AuthFn>, w: Arc<WebRTCTransportConfig>) {
+async fn accept_connection(stream: TcpStream, auth: Arc<AuthFn>, w: Arc<WebRTCTransportConfig>, db: Arc<ReferenceDb>) {
     // Validate TCP connection
     stream
         .peer_addr()
@@ -78,7 +82,7 @@ async fn accept_connection(stream: TcpStream, auth: Arc<AuthFn>, w: Arc<WebRTCTr
     let write = Sender::new(write);
 
     // Handle any resulting errors
-    if let Err(error) = handle_connection((read, write.clone()), auth, w).await {
+    if let Err(error) = handle_connection((read, write.clone()), auth, w, db).await {
         error!("Connection ended with error: {error}");
     }
 }
@@ -88,6 +92,7 @@ async fn handle_connection(
     (mut read, write): ReadWritePair,
     auth: Arc<AuthFn>,
     w: Arc<WebRTCTransportConfig>,
+    db: Arc<ReferenceDb>,
 ) -> Result<()> {
     // Wait until valid packet is sent
     let mut client: Option<Client> = None;
@@ -103,11 +108,12 @@ async fn handle_connection(
                         info!("Authenticated user {}", user.id);
 
                         let user_id = user.id.clone();
+                        
                         // Create a new client
-                        client = Some(Client::new(user, Arc::clone(&w)).await?);
+                        client = Some(Client::new(user, Arc::clone(&w), db.clone()).await?);
 
                         // Fetch rooms
-                        let available_rooms = Room::fetch_rooms(&room_ids);
+                        let available_rooms = db.fetch_available_rooms(&room_ids).await;
 
                         // Send inmediate response
                         write

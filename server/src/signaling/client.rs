@@ -18,6 +18,8 @@ use webrtc::{
     peer_connection::sdp::session_description::RTCSessionDescription,
 };
 
+use crate::reference::ReferenceDb;
+
 use super::{
     packets::{PacketC2S, PacketS2C, ServerError},
     sender::{ReadWritePair, Sender},
@@ -30,12 +32,14 @@ pub struct Client {
     pub room: Option<Arc<Room>>,
     pub signal: Arc<RoomSignal>,
     pub peer: Arc<Peer>,
+    db: Arc<ReferenceDb>,
 }
 
 impl Client {
     /// Create a new Client for a user in a room
-    pub async fn new(user: UserInformation, config: Arc<WebRTCTransportConfig>) -> Result<Self> {
+    pub async fn new(user: UserInformation, config: Arc<WebRTCTransportConfig>, db: Arc<ReferenceDb>) -> Result<Self> {
         Ok(Self {
+            db,
             user: user.clone(),
             room: None,
             signal: RoomSignal::new(Some(user.id.to_owned())),
@@ -164,7 +168,7 @@ impl Client {
                 cfg,
             } => {
                 let router_config = &peer.config().router;
-                let room = Room::get_or_create(&room_id, router_config);
+                let room = self.db.fetch_or_create_room(&room_id, router_config).await;
                 self.room = Some(room.clone());
                 self.handle_join(write, room, offer, &cfg, id).await
             }
