@@ -13,8 +13,8 @@ COPY server ./server
 RUN cargo install --locked --path server --root /usr/local
 
 # Bundle
-FROM gcr.io/distroless/cc-debian12
-COPY --from=build /usr/local/bin/server /etc/volcano/volcano-server
+FROM gcr.io/distroless/cc-debian12 AS release
+COPY --from=build /usr/local/bin/server /etc/volcano/server
 COPY config.example.toml /etc/volcano/config.toml
 
 # Signaling server port
@@ -24,5 +24,6 @@ EXPOSE 4000/tcp
 #EXPOSE 3478/udp
 
 ENV RUST_LOG=debug
+WORKDIR /etc/volcano
 
-CMD ["./etc/volcano/volcano-server"]
+ENTRYPOINT ["./server"]
