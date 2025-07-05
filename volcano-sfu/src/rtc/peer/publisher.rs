@@ -122,7 +122,7 @@ impl Publisher {
     }
     
     pub async fn close(&self) {
-        let observer = self.room.audio_observer.lock().await;
+        let observer = self.router.audio_observer.lock().await;
 
         // Remove publisher streams from audio observer
         let tracks = &*self.tracks.lock().await;

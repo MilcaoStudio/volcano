@@ -47,7 +47,7 @@ pub type OnDelReciverTrackFn = Box<
 >;
 pub struct LocalRouter {
     id: String,
-    audio_observer: Arc<Mutex<AudioObserver>>,
+    pub audio_observer: Arc<Mutex<AudioObserver>>,
     //twcc: Arc<Mutex<Option<Responder>>>,
     rtcp_sender_channel: Arc<RtcpDataSender>,
     rtcp_receiver_channel: Arc<Mutex<RtcpDataReceiver>>,
@@ -395,14 +395,14 @@ impl LocalRouter {
                     WebRTCReceiver::new(receiver.clone(), track.clone(), self.id.clone()).await;
                 rv.set_rtcp_channel(self.rtcp_sender_channel.clone());
                 let recv_kind = rv.kind();
-                let room_out = self.room.clone();
                 let stream_id = track.stream_id();
+                let router_out = self.clone();
                 rv.register_on_close(Box::new(move || {
-                    let room_in = room_out.clone();
+                    let router_in = router_out.clone();
                     let stream_id_in = stream_id.clone();
                     Box::pin(async move {
                         if recv_kind == RTPCodecType::Audio {
-                            room_in
+                            router_in
                                 .audio_observer
                                 .lock()
                                 .await

@@ -167,8 +167,7 @@ impl Client {
                 offer,
                 cfg,
             } => {
-                let router_config = &peer.config().router;
-                let room = self.db.fetch_or_create_room(&room_id, router_config).await;
+                let room = self.db.fetch_or_create_room(&room_id).await;
                 self.room = Some(room.clone());
                 self.handle_join(write, room, offer, &cfg, id).await
             }

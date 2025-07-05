@@ -19,7 +19,7 @@ use webrtc::{
 
 use serde::Serialize;
 
-use crate::{rtc::config::RouterConfig, track::{audio_observer::AudioObserver, router::LocalRouter}};
+use crate::track::router::LocalRouter;
 
 use super::peer::Peer;
 
@@ -73,7 +73,7 @@ pub struct Room {
     signalers: Arc<Mutex<Vec<Arc<RoomSignal>>>>,
     sender: Sender<RoomEvent>,
     //participants: DashSet<String>,
-    pub audio_observer: Arc<Mutex<AudioObserver>>,
+    //audio_observer: Arc<Mutex<AudioObserver>>,
     user_tracks: DashMap<String, Vec<String>>,
     peers: DashMap<String, Arc<Peer>>,
     tracks: DashMap<String, Arc<TrackLocalStaticRTP>>,
@@ -81,22 +81,22 @@ pub struct Room {
 
 impl Room {
     /// Create a new Room and initialise internal channels and maps
-    pub fn new(id: String, router_config: &RouterConfig) -> Arc<Self> {
+    pub fn new(id: String) -> Arc<Self> {
         let (sender, _dropped) = channel(10);
-        let audio_threshold = router_config.audio_level_threshold;
-        let audio_interval = router_config.audio_level_interval;
-        let audio_filter = router_config.audio_level_filter;
-        let audio_observer = AudioObserver::new(audio_threshold, audio_interval, audio_filter);
+        //let audio_threshold = router_config.audio_level_threshold;
+        //let audio_interval = router_config.audio_level_interval;
+        //let audio_filter = router_config.audio_level_filter;
+        //let audio_observer = AudioObserver::new(audio_threshold, audio_interval, audio_filter);
 
         Arc::new(Room {
             closed: Default::default(),
             data_channels: Default::default(),
-            id: id.clone(),
+            id,
             sender,
             signalers: Default::default(),
             labels: Default::default(),
             peers: Default::default(),
-            audio_observer: Arc::new(Mutex::new(audio_observer)),
+            //audio_observer: Arc::new(Mutex::new(audio_observer)),
             user_tracks: Default::default(),
             tracks: Default::default(),
         })
