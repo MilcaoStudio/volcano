@@ -2,8 +2,13 @@
 name = "volcano-sfu"
 version = "0.3.10"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["Ian Parra <ianparra200@gmail.com>"]
+description = "Selective Forwarding Unit (SFU) for WebRTC signaling apps"
+repository = "https://github.com/MilcaoStudio/volcano"
+readme = "README.md"
+license-file = "LICENSE"
+keywords = ["webrtc", "sfu", "rtc", "subscriber", "publisher", "datachannel"]
+categories = ["network-programming", "async"]
 
 [dependencies]
 # Async
