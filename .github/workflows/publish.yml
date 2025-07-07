@@ -1,0 +1,33 @@
+name: Publish Crate to crates.io
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Build crate
+        run: cargo build --release
+
+      - name: Configure Cargo credentials
+        run: |
+          mkdir -p ~/.cargo
+          echo "[registry]" > ~/.cargo/credentials.toml
+          echo "token = \"${{ secrets.CARGO_REGISTRY_TOKEN }}\"" >> ~/.cargo/credentials.toml
+
+      - name: Publish crate
+        run: cargo publish --manifest-path volcano-sfu/Cargo.toml
