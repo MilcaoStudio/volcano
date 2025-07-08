@@ -28,12 +28,8 @@ impl AudioObserver {
             threshold = 127;
         }
         let mut filter: i32 = filter_parameter;
-        if filter < 0 {
-            filter = 0;
-        }
-        if filter > 100 {
-            filter = 100;
-        }
+        filter = filter.clamp(0, 100);
+        
         Self {
             threshold,
             interval: interval_parameter,
