@@ -5,7 +5,7 @@ use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters;
 
 use webrtc::error::Result;
 use webrtc::Error as RTCError;
-use crate::buffer::buffer::{is_timestamp_wrap_around, ExtPacket};
+use crate::buffer::{is_timestamp_wrap_around, ExtPacket};
 
 use self::downtrack::DownTrack;
 

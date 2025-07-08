@@ -18,11 +18,11 @@ use webrtc::track::track_remote::TrackRemote;
 use super::downtrack::{DownTrack, DownTrackInternal};
 use super::error::Result;
 use super::receiver::{Receiver, RtcpDataReceiver, RtcpDataSender, WebRTCReceiver};
-use crate::buffer::buffer::Options as BufferOptions;
+use crate::buffer::Options as BufferOptions;
 use crate::rtc::peer::subscriber::Subscriber;
 use crate::rtc::room::{Room, RoomEvent};
 use crate::track::audio_observer::AudioObserver;
-use crate::{buffer::buffer::BufferIO, buffer::factory::AtomicFactory, rtc::config::RouterConfig};
+use crate::{buffer::BufferIO, buffer::AtomicFactory, rtc::config::RouterConfig};
 
 pub type RtcpWriterFn = Box<
     dyn (FnMut(

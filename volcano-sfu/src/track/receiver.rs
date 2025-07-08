@@ -19,7 +19,7 @@ use webrtc::track::track_remote::TrackRemote;
 use webrtc::util::Unmarshal;
 
 use crate::buffer::error::BufferError;
-use crate::buffer::buffer::{AtomicBuffer, VP8};
+use crate::buffer::{AtomicBuffer, VP8};
 
 use super::downtrack::{DownTrack, DownTrackType};
 use super::error::{Error, Result};

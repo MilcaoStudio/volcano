@@ -24,8 +24,8 @@ use std::sync::Arc;
 use std::sync::Once;
 use tokio::sync::Mutex;
 
-use crate::buffer::buffer::ExtPacket;
-use crate::buffer::factory::AtomicFactory;
+use crate::buffer::ExtPacket;
+use crate::buffer::AtomicFactory;
 
 use super::codec_parameters_fuzzy_search;
 use super::error::{Result, Error};

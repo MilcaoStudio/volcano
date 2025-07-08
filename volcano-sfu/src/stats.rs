@@ -2,7 +2,7 @@ use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
 
 use tokio::sync::Mutex;
 
-use crate::buffer::buffer::{AtomicBuffer, Stats};
+use crate::buffer::{AtomicBuffer, Stats};
 
 
 #[allow(dead_code)]

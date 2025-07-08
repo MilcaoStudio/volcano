@@ -4,6 +4,7 @@ extern crate serde;
 #[macro_use]
 extern crate log;
 
+/// Process and store incoming RTP & RTCP packets
 pub mod buffer;
 pub mod rtc;
 pub mod track;

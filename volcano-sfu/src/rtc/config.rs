@@ -4,7 +4,7 @@ use tokio::{net::UdpSocket, sync::Mutex};
 use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}};
 use anyhow::Result;
 
-use crate::{buffer::factory::AtomicFactory, track::error::ConfigError};
+use crate::{buffer::AtomicFactory, track::error::ConfigError};
 
 #[cfg(feature = "turn")]
 use crate::turn::TurnConfig;

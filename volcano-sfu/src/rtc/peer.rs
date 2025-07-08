@@ -20,7 +20,7 @@ use webrtc::{
 };
 
 use crate::{
-    buffer::factory::AtomicFactory,
+    buffer::AtomicFactory,
     rtc::peer::publisher::Publisher,
 };
 

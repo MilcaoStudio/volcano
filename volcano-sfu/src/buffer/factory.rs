@@ -1,4 +1,4 @@
-use super::buffer::AtomicBuffer;
+use super::AtomicBuffer;
 use super::rtcp_reader::RTCPReader;
 use std::collections::HashMap;
 use std::sync::Arc;
