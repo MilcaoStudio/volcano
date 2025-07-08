@@ -24,7 +24,7 @@ pub enum BufferError {
 
 impl BufferError {
     pub fn equal(&self, err: &anyhow::Error) -> bool {
-        err.downcast_ref::<Self>().map_or(false, |e| e == self)
+        err.downcast_ref::<Self>() == Some(self)
     }
 }
 

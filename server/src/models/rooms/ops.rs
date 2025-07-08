@@ -12,14 +12,14 @@ impl ReferenceDb {
     }
     
     pub async fn fetch_or_create_room(&self, id: &str) -> Arc<Room> {
-        if let Some(room) = self.fetch_room(id).await {
+        match self.fetch_room(id).await { Some(room) => {
             room
-        } else {
+        } _ => {
             let mut rooms = self.rooms.lock().await;
             let room: Arc<Room> = Room::new(id.to_owned());
             rooms.insert(id.to_string(), room.clone());
             room
-        }
+        }}
     }
     
     pub async fn fetch_available_rooms(&self, ids: &Vec<String>) -> Vec<RoomInfo> {

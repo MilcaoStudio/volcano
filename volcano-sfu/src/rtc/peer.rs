@@ -106,7 +106,7 @@ impl Peer {
     }
 
     pub async fn answer(&self, sdp: RTCSessionDescription) -> Result<RTCSessionDescription> {
-        if let Some(publisher) = &*self.publisher.lock().await {
+        match &*self.publisher.lock().await { Some(publisher) => {
             info!("[Peer {}] Get offer", self.id());
             if publisher.signaling_state() != RTCSignalingState::Stable {
                 return Err(Error::ErrOfferIgnored.into());
@@ -114,9 +114,9 @@ impl Peer {
             
             info!("[Publisher {}] Send answer", self.id());
             publisher.answer(sdp).await
-        } else {
+        } _ => {
             Err(Error::ErrNoTransportEstablished.into())
-        }
+        }}
     }
     /// Clean up any open connections
     pub async fn clean_up(&self) {
@@ -318,7 +318,7 @@ impl Peer {
     }
 
     pub async fn set_remote_description(&self, sdp: RTCSessionDescription) -> Result<()> {
-        if let Some(subscriber) = &*self.subscriber.lock().await {
+        match &*self.subscriber.lock().await { Some(subscriber) => {
             info!("[Peer {}] sets remote description", self.id);
             subscriber.set_remote_description(sdp).await?;
             self.remote_answer_pending.store(false, Ordering::Relaxed);
@@ -339,9 +339,9 @@ impl Peer {
                     error!("renegotiate err: {}", err);
                 }
             })}));
-        } else {
+        } _ => {
             return Err(Error::ErrNoTransportEstablished.into());
-        }
+        }}
 
         Ok(())
     }

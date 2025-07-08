@@ -190,7 +190,7 @@ impl Receiver for WebRTCReceiver {
         let sub_lowest_quality = |target_layer: usize| async move {
             for l in (target_layer + 1..3).rev() {
                 let mut dts = down_tracks_clone_2[l].lock().await;
-                if dts.len() == 0 {
+                if dts.is_empty() {
                     continue;
                 }
                 for d in &mut *dts {

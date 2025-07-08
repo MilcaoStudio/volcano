@@ -159,7 +159,7 @@ impl Room {
             let label_out = label_out_2.clone();
 
             // Creates data channel in subscriber peer
-            if let Ok(channel) = subscriber.create_data_channel(label_out.clone()).await {
+            match subscriber.create_data_channel(label_out.clone()).await { Ok(channel) => {
                 channel.on_message(Box::new(move |msg| {
                     let origin = sub_out.id.clone();
                     let room_inner = room_in.clone();
@@ -170,24 +170,24 @@ impl Room {
                         room_inner.fanout_message(origin, label_in, msg).await;
                     })
                 }))
-            } else {
+            } _ => {
                 continue;
-            }
+            }}
 
             info!("Data channel negotiation");
-            if let Err(err) = subscriber.negotiate(Some(RTCOfferOptions {
+            match subscriber.negotiate(Some(RTCOfferOptions {
                 ice_restart: true,
                 voice_activity_detection: true,
-            })).await {
+            })).await { Err(err) => {
                 error!("negotiate error:{}", err);
-            } else {
+            } _ => {
                 info!("Data channel negotiation successful");
-            }
+            }}
         }
     }
 
     pub(crate) async fn add_api_channel(self: &Arc<Self>, id: &str) {
-        if let Some(peer) = self.get_peer(id).await {
+        match self.get_peer(id).await { Some(peer) => {
             let room_out = self.clone();
             //let user_id_out = id.to_owned();
             if peer.subscriber().await.is_none() {
@@ -208,14 +208,14 @@ impl Room {
             }));
             let room_id = self.id.clone();
             info!("[Room {room_id}] Data channel negotiation");
-            if let Err(err) = subscriber.negotiate(None).await {
+            match subscriber.negotiate(None).await { Err(err) => {
                 error!("[Room {room_id}] negotiate error: {}", err);
-            } else {
+            } _ => {
                 info!("[Room {room_id}] Negotiation successful");
-            }
-        } else {
+            }}
+        } _ => {
             error!("[Room {}] Unknown peer {id}", self.id);
-        }
+        }}
     }
 
     pub async fn add_peer(&self, peer: Arc<Peer>) {
@@ -504,11 +504,11 @@ impl Room {
         if let Ok(payload) = serde_json::to_string(&msg) {
             info!("[Room {}] Sending room event: {}", self.id, payload);
             for peer in self.peers.iter() {
-                if let Some(subscriber) = peer.subscriber().await {
+                match peer.subscriber().await { Some(subscriber) => {
                     subscriber.send_message(&payload).await;
-                } else {
+                } _ => {
                     warn!("[{}] No subscriber available", peer.id());
-                }
+                }}
             }
         } else {
             error!("Error parsing {:?}", msg);

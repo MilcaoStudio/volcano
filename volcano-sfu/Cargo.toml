@@ -1,7 +1,7 @@
 [package]
 name = "volcano-sfu"
-version = "0.3.10"
-edition = "2021"
+version = "0.3.11"
+edition = "2024"
 authors = ["Ian Parra <ianparra200@gmail.com>"]
 description = "Selective Forwarding Unit (SFU) for WebRTC signaling apps"
 repository = "https://github.com/MilcaoStudio/volcano"

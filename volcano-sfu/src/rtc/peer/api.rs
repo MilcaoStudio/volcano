@@ -76,7 +76,6 @@ pub async fn create_subscriber_connection(cfg: &Arc<WebRTCTransportConfig>) -> R
     })
         .await
         .map(Arc::new)
-        .map_err(Into::into)
 }
 
 pub async fn create_publisher_connection(cfg: WebRTCTransportConfig) -> Result<Arc<RTCPeerConnection>> {
@@ -254,5 +253,4 @@ pub async fn create_publisher_connection(cfg: WebRTCTransportConfig) -> Result<A
     api.new_peer_connection(cfg.configuration)
         .await
         .map(Arc::new)
-        .map_err(Into::into)
 }
