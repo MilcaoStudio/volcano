@@ -242,18 +242,10 @@ impl Client {
                     "[Publisher {}] ICE connection state changed to: {}",
                     peer_id_in, state
                 );
-                match state {
-                    RTCIceConnectionState::Failed => {
-                        if let Err(err) = write_in
-                            .send(PacketS2C::ServerError {
-                                error: ServerError::PeerConnectionFailed,
-                            })
-                            .await
-                        {
-                            error!("Write failed: {err}");
-                        };
-                    }
-                    _ => {}
+                if state == RTCIceConnectionState::Failed {
+                    if let Err(err) = write_in.send(PacketS2C::ServerError { error: ServerError::PeerConnectionFailed, }).await {
+                        error!("Write failed: {err}");
+                    };
                 }
             })
         }))
@@ -310,7 +302,7 @@ impl Client {
             }
             Err(err) => {
                 error!("answer error: {}", err);
-                return Err(err);
+                Err(err)
             }
         }
     }

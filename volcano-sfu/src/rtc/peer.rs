@@ -330,7 +330,7 @@ impl Peer {
             }
 
             // set renegotation method for subscriber
-            let sub = Arc::clone(&subscriber);
+            let sub = subscriber.clone();
             subscriber.pc.on_negotiation_needed(Box::new(move || {
                 let sub_in = sub.clone();
                 Box::pin(async move {

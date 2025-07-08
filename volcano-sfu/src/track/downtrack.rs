@@ -249,7 +249,7 @@ impl TrackLocal for DownTrackInternal {
         let codec = codec_parameters_fuzzy_search(parameters, t.codec_parameters())?;
 
         let mut ssrc = self.ssrc.lock().await;
-        *ssrc = t.ssrc() as u32;
+        *ssrc = t.ssrc();
         let mut payload_type = self.payload_type.lock().await;
         *payload_type = codec.payload_type;
         let mut write_stream = self.write_stream.lock().await;
@@ -630,12 +630,8 @@ impl DownTrack {
         }
 
         match *self.track_type.lock().await {
-            DownTrackType::SimpleDownTrack => {
-                return self.write_simple_rtp(pkt).await;
-            }
-            DownTrackType::SimulcastDownTrack => {
-                return self.write_simulcast_rtp(pkt, layer as i32).await;
-            }
+            DownTrackType::SimpleDownTrack => self.write_simple_rtp(pkt).await,
+            DownTrackType::SimulcastDownTrack => self.write_simulcast_rtp(pkt, layer as i32).await
         }
     }
 

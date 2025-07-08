@@ -106,8 +106,8 @@ impl Room {
     pub(crate) async fn add_data_channel(self: &Arc<Self>, owner: &str, dc: Arc<RTCDataChannel>) {
         let label = dc.label().to_string();
         let origin = owner.to_owned();
-        let room_out = Arc::clone(&self);
-        let room_out_2 = Arc::clone(&self);
+        let room_out = Arc::clone(self);
+        let room_out_2 = Arc::clone(self);
         for lbl in self.labels.iter() {
             if lbl.eq(&label) {
                 info!("[Publisher {} -> Room {}] Data channel `{}` already exists, adding listener", owner, self.id, label);
@@ -317,8 +317,7 @@ impl Room {
             peer.clean_up().await;
         };
 
-        let peer_count = self.peers.len();
-        peer_count
+        self.peers.len()
     }
 
     /// Get all user IDs currently in the room
@@ -352,7 +351,7 @@ impl Room {
         let mut users = BTreeMap::new();
         // Serialize user tracks
         user_tracks.into_iter().for_each(|(key, value)| {users.insert(key, value);});
-        return RoomInfo { id: self.id.clone(), users };
+        RoomInfo { id: self.id.clone(), users }
     }
 
     pub async fn subscribe(self: &Arc<Self>, peer: Arc<Peer>) {

@@ -33,19 +33,6 @@ pub struct ICECandidate {
     pub username_fragment: String,
 }
 
-/// Either description or ICE candidate
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum Negotiation {
-    /// Session Description
-    SDP {
-        description: RTCSessionDescription,
-        media_type_buffer: Option<Vec<MediaType>>,
-    },
-    /// ICE Candidate
-    ICE { candidate: ICECandidate },
-}
-
 /// Packet sent from the client to the server
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]

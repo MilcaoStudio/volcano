@@ -235,9 +235,10 @@ impl BufferIO for AtomicBuffer {
 
         Err(BufferError::ErrNilPacket)
     }
+
     async fn close(&self) -> Result<()> {
-        let buffer = self.buffer.lock().await;
-        if buffer.bucket.is_some() && buffer.codec_type == RTPCodecType::Video {}
+        //let buffer = self.buffer.lock().await;
+        //if buffer.bucket.is_some() && buffer.codec_type == RTPCodecType::Video {}
 
         Ok(())
     }
@@ -326,7 +327,7 @@ impl AtomicBuffer {
     ) -> Vec<Box<dyn RtcpPacket + Send + Sync>> {
         let mut pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> = Vec::new();
 
-        if buffer.nacker == None {
+        if buffer.nacker.is_none() {
             return pkts;
         }
         let seq_number = buffer.cycles | buffer.max_seq_no as u32;
@@ -618,7 +619,7 @@ impl VP8 {
     pub fn unmarshal(&mut self, payload: &[u8]) -> Result<()> {
         let payload_len = payload.len();
         if payload_len == 0 {
-            return Err(BufferError::ErrNilPacket.into());
+            return Err(BufferError::ErrNilPacket);
         }
 
         let mut idx: usize = 0;
@@ -627,7 +628,7 @@ impl VP8 {
             idx += 1;
 
             if payload_len < idx + 1 {
-                return Err(BufferError::ErrShortPacket.into());
+                return Err(BufferError::ErrShortPacket);
             }
 
             self.temporal_supported = payload[idx] & 0x20 > 0;
@@ -638,7 +639,7 @@ impl VP8 {
             if payload[idx] & 0x80 > 0 {
                 idx += 1;
                 if payload_len < idx + 1 {
-                    return Err(BufferError::ErrShortPacket.into());
+                    return Err(BufferError::ErrShortPacket);
                 }
                 self.picture_id_idx = idx as i32;
                 let pid = payload[idx] & 0x7f;
@@ -646,7 +647,7 @@ impl VP8 {
                 if payload[idx] & 0x80 > 0 {
                     idx += 1;
                     if payload_len < idx + 1 {
-                        return Err(BufferError::ErrShortPacket.into());
+                        return Err(BufferError::ErrShortPacket);
                     }
                     self.mbit = true;
 
@@ -660,12 +661,12 @@ impl VP8 {
             if l {
                 idx += 1;
                 if payload_len < idx + 1 {
-                    return Err(BufferError::ErrShortPacket.into());
+                    return Err(BufferError::ErrShortPacket);
                 }
                 self.tlz_idx = idx as i32;
 
                 if idx >= payload_len {
-                    return Err(BufferError::ErrShortPacket.into());
+                    return Err(BufferError::ErrShortPacket);
                 }
                 self.tl0_picture_idx = payload[idx];
             }
@@ -673,24 +674,24 @@ impl VP8 {
             if self.temporal_supported || k {
                 idx += 1;
                 if payload_len < idx + 1 {
-                    return Err(BufferError::ErrShortPacket.into());
+                    return Err(BufferError::ErrShortPacket);
                 }
                 self.tid = (payload[idx] & 0xc0) >> 6;
             }
 
             if idx >= payload_len {
-                return Err(BufferError::ErrShortPacket.into());
+                return Err(BufferError::ErrShortPacket);
             }
             idx += 1;
             if payload_len < idx + 1 {
-                return Err(BufferError::ErrShortPacket.into());
+                return Err(BufferError::ErrShortPacket);
             }
             // Check is packet is a keyframe by looking at P bit in vp8 payload
             self.is_key_frame = payload[idx] & 0x01 == 0 && s;
         } else {
             idx += 1;
             if payload_len < idx + 1 {
-                return Err(BufferError::ErrShortPacket.into());
+                return Err(BufferError::ErrShortPacket);
             }
             // Check is packet is a keyframe by looking at P bit in vp8 payload
             self.is_key_frame = payload[idx] & 0x01 == 0 && s;

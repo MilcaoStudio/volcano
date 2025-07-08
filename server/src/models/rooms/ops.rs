@@ -8,7 +8,7 @@ impl ReferenceDb {
     /// Get or create a Room by its ID
     pub async fn fetch_room(&self, id: &str) -> Option<Arc<Room>> {
         let rooms = self.rooms.lock().await;
-        rooms.get(id).map(|room| room.clone())
+        rooms.get(id).cloned()
     }
     
     pub async fn fetch_or_create_room(&self, id: &str) -> Arc<Room> {

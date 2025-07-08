@@ -1,6 +1,6 @@
 use std::any::Any;
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::Mutex;
+use webrtc::error::Error as RTCError;
+use webrtc::rtcp::packet::Packet as RtcpPacket;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp::packet::Packet as RTCPacket;
-use webrtc::rtcp::packet::Packet as RtcpPacket;
-use webrtc::error::Error as RTCError;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecParameters, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::track::track_remote::TrackRemote;
@@ -56,10 +56,7 @@ pub trait Receiver: Send + Sync {
     async fn delete_down_track(&self, layer: usize, id: String);
     async fn register_on_close(&self, f: OnCloseHandlerFn);
     async fn send_rtcp(&self, p: Vec<Box<dyn RtcpPacket + Send + Sync>>) -> Result<()>;
-    fn set_rtcp_channel(
-        &mut self,
-        sender: Arc<Sender<Vec<Box<dyn RtcpPacket + Send + Sync>>>>,
-    );
+    fn set_rtcp_channel(&mut self, sender: Arc<Sender<Vec<Box<dyn RtcpPacket + Send + Sync>>>>);
     async fn get_sender_report_time(&self, layer: usize) -> (u32, u64);
     fn as_any(&self) -> &(dyn Any + Send + Sync);
     async fn write_rtp(&self, layer: usize) -> Result<()>;
@@ -217,7 +214,7 @@ impl Receiver for WebRTCReceiver {
         }
 
         Some(layer)
-        
+
         // tokio::spawn(async move { self.write_rtp(layer) });
     }
     async fn add_down_track(&self, track: Arc<DownTrack>, best_quality_first: bool) {
@@ -247,7 +244,10 @@ impl Receiver for WebRTCReceiver {
             track
                 .set_track_type(DownTrackType::SimulcastDownTrack)
                 .await;
-            info!("[WebRTCReceiver::add_down_track] Add simulcast track {}", track_id);
+            info!(
+                "[WebRTCReceiver::add_down_track] Add simulcast track {}",
+                track_id
+            );
         } else {
             if self.down_track_subscribed(layer, track.clone()).await {
                 debug!("Track {} already subscribed", track_id);
@@ -256,7 +256,10 @@ impl Receiver for WebRTCReceiver {
 
             track.set_initial_layers(0, 0);
             track.set_track_type(DownTrackType::SimpleDownTrack).await;
-            info!("WebRTCReceiver::add_down_track Add simple track {}", track_id);
+            info!(
+                "WebRTCReceiver::add_down_track Add simple track {}",
+                track_id
+            );
         }
 
         self.store_down_track(layer, track).await
@@ -324,7 +327,7 @@ impl Receiver for WebRTCReceiver {
 
     async fn send_rtcp(&self, p: Vec<Box<dyn RtcpPacket + Send + Sync>>) -> Result<()> {
         // Checks if first packet is PLI
-        if let Some(packet) = p.get(0) {
+        if let Some(packet) = p.first() {
             if packet.as_any().downcast_ref::<webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>().is_some() {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -349,10 +352,7 @@ impl Receiver for WebRTCReceiver {
         Ok(())
     }
 
-    fn set_rtcp_channel(
-        &mut self,
-        sender: Arc<Sender<Vec<Box<dyn RtcpPacket + Send + Sync>>>>,
-    ) {
+    fn set_rtcp_channel(&mut self, sender: Arc<Sender<Vec<Box<dyn RtcpPacket + Send + Sync>>>>) {
         self.rtcp_sender = sender;
     }
 
@@ -439,7 +439,11 @@ impl Receiver for WebRTCReceiver {
                                 //use tmp_val here just to skip the build error
                                 let mut pending_tracks = Vec::new();
                                 for dt in &*self.pending_tracks[layer].lock().await {
-                                    pending_tracks.push((dt.current_spatial_layer() as usize, dt.id().clone(), dt.clone()));
+                                    pending_tracks.push((
+                                        dt.current_spatial_layer() as usize,
+                                        dt.id().clone(),
+                                        dt.clone(),
+                                    ));
                                 }
                                 for (dt_layer, id, dt) in pending_tracks {
                                     // Delete downtrack from its layer
@@ -454,11 +458,14 @@ impl Receiver for WebRTCReceiver {
                             } else {
                                 let sender_ssrc = rand::random::<u32>();
                                 let media_ssrc = self.ssrc(layer).await;
-                                debug!("Send PLI, sender ssrc {sender_ssrc}, media_ssrc {media_ssrc}");
+                                debug!(
+                                    "Send PLI, sender ssrc {sender_ssrc}, media_ssrc {media_ssrc}"
+                                );
                                 self.send_rtcp(vec![Box::new(PictureLossIndication {
                                     sender_ssrc,
                                     media_ssrc,
-                                })]).await?;
+                                })])
+                                .await?;
                             }
                         }
 
@@ -467,24 +474,24 @@ impl Receiver for WebRTCReceiver {
                             let dts = self.down_tracks[layer].lock().await;
 
                             for dt in &*dts {
-                                
-                                if let Err(err) = dt.write_rtp(pkt.clone(), layer).await {
-                                    if let Error::ErrWebRTC(e) = err {
-                                        match e {
-                                            RTCError::ErrClosedPipe
-                                            | RTCError::ErrDataChannelNotOpen
-                                            | RTCError::ErrConnectionClosed => {
-                                                error!(
+                                if let Err(Error::ErrWebRTC(e)) = dt.write_rtp(pkt.clone(), layer).await
+                                {
+                                    match e {
+                                        RTCError::ErrClosedPipe
+                                        | RTCError::ErrDataChannelNotOpen
+                                        | RTCError::ErrConnectionClosed => {
+                                            error!(
                                                     "down track write error {}, layer {}, queued for remove",
                                                     e,
                                                     layer
                                                 );
-                                                delete_down_track_params
-                                                    .push((layer, dt.id().clone()));
-                                            }
-                                            _ => {
-                                                error!("down track unknown write error {}, layer {}", e, layer);
-                                            }
+                                            delete_down_track_params.push((layer, dt.id().clone()));
+                                        }
+                                        _ => {
+                                            error!(
+                                                "down track unknown write error {}, layer {}",
+                                                e, layer
+                                            );
                                         }
                                     }
                                 }

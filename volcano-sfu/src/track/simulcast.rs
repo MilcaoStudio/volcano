@@ -22,6 +22,12 @@ pub struct SimulcastTrackHelpers {
 
 impl SimulcastTrackHelpers {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for SimulcastTrackHelpers {
+    fn default() -> Self {
         Self {
             switch_delay: SystemTime::now(),
             temporal_supported: false,
