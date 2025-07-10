@@ -450,12 +450,14 @@ impl LocalRouter {
             let mut b = vec![0u8; 1500];
 
             while let Ok((pkt, _)) = track.read(&mut b).await {
+                let tmp_b = b.clone();
+                if let Err(err) = rtcp_reader.lock().await.write(tmp_b).await {
+                    error!("rtcp_reader write error: {}", err);
+                };
                 if let Err(err) = buffer_clone.write(pkt).await {
                     error!("write error: {}", err);
                 }
             }
-
-            Result::<()>::Ok(())
         });
         (result_receiver, published)
     }
