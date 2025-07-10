@@ -32,6 +32,12 @@ pub enum Error {
     ErrNoReceiverFound,
     #[error("channel send error")]
     ErrChannelSend,
+    #[error("receiver layer #{0} is not available")]
+    ReceiverLayerNotAvailable(usize),
+    #[error("receiver is closed")]
+    ReceiverClosed,
+    #[error("track is already added in layer #{0}")]
+    DuplicatedTrack(usize),
     // #[error("webrtc error error")]
     // ErrWebRTCError(WebRTCErrorError),
 }
