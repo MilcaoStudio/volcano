@@ -2,33 +2,66 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[derive(Default, Clone, Debug)]
-pub struct AudioStream {
+struct AudioStream {
     id: String,
     sum: i32,
     total: i32,
 }
+
+/// Audio observer for audio activity detection.
+/// 
+/// # Examples
+/// ```
+/// use std::sync::Arc;
+/// use tokio::sync::Mutex;
+/// use tokio::time::sleep;
+/// use tokio::runtime::Runtime;
+/// use std::time::Duration;
+/// use volcano_sfu::track::audio_observer::AudioObserver;
+/// 
+/// let rt = Runtime::new().unwrap();
+/// let observer = Arc::new(Mutex::new(AudioObserver::new(70, 100, 50)));
+/// let observer2 = observer.clone();
+/// 
+/// rt.spawn(async move {
+///     let mut i = 0u8;
+///     observer2.lock().await.add_stream("stream1".to_owned()).await;
+///     while i < 10 {
+///         observer2.lock().await.observe("stream1", 50).await;
+///     }
+/// });
+/// 
+/// rt.block_on(async move {
+///     let mut i = 0u8;
+///     while i < 5 {
+///         let mut observer = observer.lock().await;
+///         let streams = observer.calc().await;
+///         if let Some(streams) = streams {
+///             assert_eq!(streams.len(), 1);
+///             assert_eq!(streams[0], "stream1");
+///         }
+///         sleep(Duration::from_millis(observer.interval as u64)).await;
+///         i += 1;
+///     }
+/// });
+/// ```
 #[derive(Default, Clone, Debug)]
 pub struct AudioObserver {
     streams: Arc<Mutex<Vec<AudioStream>>>,
+    /// Expected **total audio power** an audio stream should have to be considered active.
     pub expected: i32,
+    /// In each observation interval, if the audio level is lower than `threshold`, audio power is accumulated.
     pub threshold: u8,
+    /// Interval in milliseconds between each calculation of audio activity.
     pub interval: i32,
     previous: Vec<String>,
 }
 
 impl AudioObserver {
-    /// Creates an audio observer with threshold lower than 128, an interval, and a filter from 0 to 100.
-    /// ## Example
-    /// ```
-    /// let observer = AudioObserver::new(70, 80, 50);
-    /// ```
+    /// Creates an audio observer with threshold lower than 128, an interval in milliseconds, and a filter from 0 to 100.
     pub fn new(threshold_parameter: u8, interval_parameter: i32, filter_parameter: i32) -> Self {
-        let mut threshold: u8 = threshold_parameter;
-        if threshold > 127 {
-            threshold = 127;
-        }
-        let mut filter: i32 = filter_parameter;
-        filter = filter.clamp(0, 100);
+        let threshold: u8 = threshold_parameter.clamp(0, 127);
+        let filter: i32 = filter_parameter.clamp(0, 100);
         
         Self {
             threshold,
@@ -51,8 +84,9 @@ impl AudioObserver {
         streams.retain(|stream| !stream.id.eq(stream_id));
     }
 
-    /// Observes whether d_bov is higher than threshold for target stream, then it should be ignored.
-    /// If d_bov is lower or equal than treshold, it sums d_bov into target stream.
+    /// Observes whether `d_bov` is higher than threshold for target stream, then it should be ignored.
+    /// 
+    /// If `d_bov` is lower or equal than treshold, it sums `d_bov` into target stream.
     pub async fn observe(&self, stream_id: &str, d_bov: u8) {
         let mut streams = self.streams.lock().await;
         
@@ -69,8 +103,10 @@ impl AudioObserver {
     }
 
     /// Sorts current streams vector by total, and secondly by sum.
-    /// Filters streams which total is equal or higher than expected value, the sum and total from selected streams are reset.
-    /// Returns vector of stream ids from selected streams, or None if the vector could be empty.
+    /// 
+    /// Filters streams which total is equal or higher than `expected`, the sum and total from selected streams are reset.
+    /// # Returns
+    /// Vector of stream ids from selected streams, or None if the vector could be empty.
     pub async fn calc(&mut self) -> Option<Vec<String>> {
         let mut streams = self.streams.lock().await;
 
