@@ -146,19 +146,37 @@ impl AtomicSequencer {
         }
     }
 
+    /// Gets a list of packets matching the requested sequence numbers for retransmission,
+    /// filtering out recently retransmitted packets to avoid flooding.
+    ///
+    /// # Arguments
+    /// * `seq_nos` - Slice of sequence numbers to look up for retransmission.
+    ///
+    /// # Returns
+    /// A vector of `PacketMeta` objects ready to be retransmitted.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// let packets = downtrack.get_seq_no_pairs(&[1234, 5678]).await;
+    /// for packet in packets {
+    ///     send_rtcp_nack(&packet).await?;
+    /// }
+    /// ```
     pub async fn get_seq_no_pairs(&self, seq_nos: &[u16]) -> Vec<PacketMeta> {
         let mut sequencer = self.sequencer.lock().await;
 
         let mut meta: Vec<PacketMeta> = Vec::new();
 
-        let ref_time = SystemTime::now()
+        let now_as_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_millis()
-            - sequencer.start_time;
+            .as_millis();
+        let ref_time = now_as_millis - sequencer.start_time;
 
         for sn in seq_nos {
-            let mut step = sequencer.step - (sequencer.head_sn - sn) as i32 - 1;
+            let delta = (sequencer.head_sn.wrapping_sub(*sn)) as i32;
+            let mut step = sequencer.step - delta - 1;
 
             if step < 0 {
                 if -step >= sequencer.max {
@@ -168,13 +186,14 @@ impl AtomicSequencer {
                 step += sequencer.max;
             }
 
-            let seq = sequencer.seq.get_mut(&step).unwrap();
-
-            if seq.target_seq_no == *sn
-                && (seq.last_nack == 0 || ref_time - seq.last_nack > IGNORE_RETRANSMISSION as u128)
-            {
-                seq.last_nack = ref_time;
-                meta.push(seq.clone());
+            let seq = sequencer.seq.get_mut(&step);
+            if let Some(seq) = seq {
+                if seq.target_seq_no == *sn
+                    && (seq.last_nack == 0 || ref_time - seq.last_nack > IGNORE_RETRANSMISSION as u128)
+                {
+                    seq.last_nack = ref_time;
+                    meta.push(seq.clone());
+                }
             }
         }
 
