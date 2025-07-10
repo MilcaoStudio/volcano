@@ -74,37 +74,49 @@ impl AtomicSequencer {
         }
     }
 
+    /// Inserts a new RTP packet into the sequencer and returns the next ordered packet (if available).
+    ///
+    /// This method handles sequence number tracking, reordering logic, and step management to ensure
+    /// packets are emitted in the correct order, even when received out of sequence.
+    ///
+    /// # Arguments
+    ///
+    /// * `sn` - Original sequence number of the incoming packet.
+    /// * `off_sn` - Offset sequence number used for synchronization.
+    /// * `timestamp` - RTP timestamp of the packet.
+    /// * `layer` - Spatial/temporal layer index.
+    /// * `head` - If true, resets or updates the head reference for sequencing.
+    /// 
     pub async fn push(
-        &mut self,
+        &self,
         sn: u16,
         off_sn: u16,
-        timastamp: u32,
+        timestamp: u32,
         layer: u8,
         head: bool,
     ) -> Option<PacketMeta> {
         let mut sequencer = self.sequencer.lock().await;
 
+        // Is the first packet?
         if !sequencer.init {
             sequencer.head_sn = off_sn;
             sequencer.init = true;
         }
 
         if head {
-            let inc = off_sn - sequencer.head_sn;
+            let inc = off_sn.wrapping_sub(sequencer.head_sn) as i16;
 
-            for _i in 1..inc {
-                sequencer.step += 1;
-                if sequencer.step >= sequencer.max {
-                    sequencer.step = 0;
-                }
+            if inc > 0 {
+                sequencer.step = (sequencer.step + inc as i32) % sequencer.max;
             }
+
             sequencer.head_sn = off_sn;
         } else {
-            let step = sequencer.step - (sequencer.head_sn - off_sn) as i32;
+            let delta = sequencer.head_sn.wrapping_sub(off_sn) as i16;
+            let step = sequencer.step - delta as i32;
             if step < 0 && -step >= sequencer.max {
                 return None;
             }
-            //step = step + sequencer.max;
         }
 
         let cur_step = sequencer.step;
@@ -114,7 +126,7 @@ impl AtomicSequencer {
             PacketMeta {
                 source_seq_no: sn,
                 target_seq_no: off_sn,
-                timestamp: timastamp,
+                timestamp,
                 layer,
                 ..Default::default()
             },
