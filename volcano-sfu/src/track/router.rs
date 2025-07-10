@@ -226,11 +226,10 @@ impl LocalRouter {
         subscriber
             .add_down_track(receiver.stream_id(), down_track_arc.clone())
             .await;
-        receiver
-            .add_down_track(down_track_arc, self.config.simulcast.best_quality_first)
-            .await;
 
-        Ok(None)
+        receiver
+            .add_down_track(down_track_arc.clone(), self.config.simulcast.best_quality_first).await
+            .map(|_| Some(down_track_arc))
     }
 
     pub async fn add_down_tracks(
@@ -248,7 +247,9 @@ impl LocalRouter {
                 "Add actual downtrack to subscriber, subscriber: {}",
                 subscriber.id
             );
-            self.add_down_track(subscriber.clone(), receiver).await?;
+            if let Err(err) = self.add_down_track(subscriber.clone(), receiver).await {
+                error!("add_down_track err: {}", err);
+            };
             subscriber.negotiate(None).await?;
             return Ok(());
         }
@@ -264,7 +265,9 @@ impl LocalRouter {
         if !recs.is_empty() {
             info!("Add downtracks from stored receivers to subscriber");
             for val in recs {
-                self.add_down_track(subscriber.clone(), val.clone()).await?;
+                if let Err(err) = self.add_down_track(subscriber.clone(), val.clone()).await {
+                    error!("add_down_track err: {}", err);
+                };
             }
             subscriber.negotiate(None).await?;
         }
