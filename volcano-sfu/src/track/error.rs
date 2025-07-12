@@ -38,6 +38,8 @@ pub enum Error {
     ReceiverClosed,
     #[error("track is already added in layer #{0}")]
     DuplicatedTrack(usize),
+    #[error("spatial layer #{0} is currently full")]
+    FullSpatialLayer(i32),
     // #[error("webrtc error error")]
     // ErrWebRTCError(WebRTCErrorError),
 }

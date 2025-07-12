@@ -537,9 +537,7 @@ impl DownTrack {
             DownTrackType::SimulcastDownTrack => {
                 let csl = self.current_spatial_layer.load(Ordering::Relaxed);
                 if csl != self.target_spatial_layer.load(Ordering::Relaxed) || csl == target_layer {
-                    return Err(Error::ErrWebRTC(RTCError::new(String::from(
-                        "error spatial layer busy..",
-                    ))));
+                    return Err(Error::FullSpatialLayer(target_layer));
                 }
                 let receiver = &self.down_track_local.receiver;
                 match receiver
@@ -566,9 +564,9 @@ impl DownTrack {
             }
         }
 
-        Err(Error::ErrWebRTC(RTCError::new(String::from(
-            "Error spatial not supported.",
-        ))))
+        Err(Error::ErrWebRTC(RTCError::new(
+            "Spatial layer is not supported for this track.".to_string(),
+        )))
     }
     
     pub fn switch_spatial_layer_forced(&self, layer: i32) {
