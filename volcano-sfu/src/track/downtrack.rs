@@ -21,7 +21,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::sync::Once;
+//use std::sync::Once;
 use tokio::sync::Mutex;
 
 use crate::buffer::ExtPacket;
@@ -87,10 +87,10 @@ pub struct DownTrackInternal {
 }
 
 impl DownTrackInternal {
-    pub(super) async fn new(
+    pub(super) fn new(
         c: RTCRtpCodecCapability,
         r: Arc<dyn Receiver>,
-        mt: i32,
+        max_track: i32,
     ) -> Self {
         Self {
             codec: c,
@@ -100,7 +100,7 @@ impl DownTrackInternal {
             mime: Mutex::default(),
             ssrc: Mutex::default(),
             stream_id: r.stream_id(),
-            max_track: mt,
+            max_track,
             payload_type: Mutex::default(),
             sequencer: Arc::default(),
             buffer_factory: Mutex::new(AtomicFactory::new(1000, 1000)),
@@ -110,10 +110,6 @@ impl DownTrackInternal {
             receiver: r.clone(),
             write_stream: Mutex::default(),
             on_bind_handler: Arc::default(),
-            close_once: Once::new(),
-            octet_count: AtomicU32::default(),
-            packet_count: AtomicU32::default(),
-            max_packet_ts: 0,
         }
     }
 
@@ -333,10 +329,12 @@ impl TrackLocal for DownTrackInternal {
 pub struct DownTrack {
     peer_id: String,
     track_type: Mutex<DownTrackType>,
+    /// Packet payload stored in buffer.
     pub payload: Vec<u8>,
 
     current_spatial_layer: AtomicI32,
     target_spatial_layer: AtomicI32,
+    /// Temporal layer of the track. Always 0 for simple tracks.
     pub temporal_layer: AtomicI32,
 
     sn_offset: Mutex<u16>,
@@ -345,29 +343,27 @@ pub struct DownTrack {
     last_sn: Mutex<u16>,
     last_ts: Mutex<u32>,
 
+    /// Simulcast track helpers.
     pub simulcast: Arc<Mutex<SimulcastTrackHelpers>>,
-    max_spatial_layer: AtomicI32,
-    max_temporal_layer: AtomicI32,
+    /// Maximum spatial layer of the track.
+    pub max_spatial_layer: AtomicI32,
+    /// Maximum temporal layer of the track.
+    pub max_temporal_layer: AtomicI32,
+    /// RTCP transceiver of the track.
     pub transceiver: Option<Arc<RTCRtpTransceiver>>,
-    pub on_close_handler: Arc<Mutex<Option<OnCloseFn>>>,
+    on_close_handler: Arc<Mutex<Option<OnCloseFn>>>,
 
-    #[allow(dead_code)]
-    close_once: Once,
     octet_count: AtomicU32,
-    #[allow(dead_code)]
     packet_count: AtomicU32,
-    #[allow(dead_code)]
-    max_packet_ts: u32,
-
     down_track_local: Arc<DownTrackInternal>,
 }
 
 impl DownTrack {
-    pub async fn new(
+    pub fn new(
         c: RTCRtpCodecCapability,
         r: Arc<dyn Receiver>,
         peer_id: String,
-        mt: i32,
+        max_track: i32,
     ) -> Self {
         Self {
             peer_id,
@@ -385,11 +381,11 @@ impl DownTrack {
             max_temporal_layer: AtomicI32::default(),
             transceiver: Option::default(),
             on_close_handler: Arc::default(),
-            close_once: Once::new(),
+            //close_once: Once::new(),
             octet_count: AtomicU32::default(),
             packet_count: AtomicU32::default(),
-            max_packet_ts: 0,
-            down_track_local: Arc::new(DownTrackInternal::new(c, r, mt).await),
+            //max_packet_ts: 0,
+            down_track_local: Arc::new(DownTrackInternal::new(c, r, max_track)),
         }
     }
 

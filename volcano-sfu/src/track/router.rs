@@ -156,7 +156,6 @@ impl LocalRouter {
                 receiver.clone(),
                 self.config.max_packet_track,
             )
-            .await,
         );
         let transceiver = subscriber
             .pc
