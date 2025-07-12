@@ -50,7 +50,7 @@ pub enum DownTrackType {
 
 #[derive(Default, Clone)]
 pub struct DownTrackInfo {
-    pub layer: i32,
+    pub layer: u8,
     pub last_ssrc: u32,
     pub track_type: DownTrackType,
     pub payload: Vec<u8>,
@@ -58,32 +58,27 @@ pub struct DownTrackInfo {
 
 
 pub struct DownTrackInternal {
-    pub id: String,
-    pub rid: String,
-    pub bound: AtomicBool,
-    pub mime: Mutex<String>,
-    pub ssrc: Mutex<u32>,
-    pub stream_id: String,
+    id: String,
+    rid: String,
+    bound: AtomicBool,
+    mime: Mutex<String>,
+    ssrc: Mutex<u32>,
+    stream_id: String,
     max_track: i32,
-    pub payload_type: Mutex<u8>,
-    pub sequencer: Arc<Mutex<AtomicSequencer>>,
+    payload_type: Mutex<u8>,
+    sequencer: Arc<Mutex<AtomicSequencer>>,
     buffer_factory: Mutex<AtomicFactory>,
+    /// Whether the track is enabled (unmuted).
     pub enabled: AtomicBool,
+    /// Whether the track is re-synced.
     pub re_sync: AtomicBool,
-    pub last_ssrc: AtomicU32,
+    last_ssrc: AtomicU32,
+    /// Codec capability of the track.
     pub codec: RTCRtpCodecCapability,
+    /// Receiver of the track.
     pub receiver: Arc<dyn Receiver>,
-    pub write_stream: Mutex<Option<Arc<dyn TrackLocalWriter + Send + Sync>>>, //Option<TrackLocalWriter>,
+    write_stream: Mutex<Option<Arc<dyn TrackLocalWriter + Send + Sync>>>,
     on_bind_handler: Arc<Mutex<Option<OnBindFn>>>,
-
-    #[allow(dead_code)]
-    close_once: Once,
-    #[allow(dead_code)]
-    octet_count: AtomicU32,
-    #[allow(dead_code)]
-    packet_count: AtomicU32,
-    #[allow(dead_code)]
-    max_packet_ts: u32,
 }
 
 impl DownTrackInternal {
@@ -113,6 +108,7 @@ impl DownTrackInternal {
         }
     }
 
+    /// Registers a function to be called when the track is bound.
     pub async fn on_bind(&self, f: OnBindFn) {
         let mut handler = self.on_bind_handler.lock().await;
         *handler = Some(f);
@@ -389,10 +385,12 @@ impl DownTrack {
         }
     }
 
+    /// Returns true if the track is bound to a receiver.
     pub fn bound(&self) -> bool {
         self.down_track_local.bound.load(Ordering::Relaxed)
     }
 
+    /// Closes the track and calls the close handler.
     pub async fn close(&self) {
         let mut handler = self.on_close_handler.lock().await;
         if let Some(f) = &mut *handler {
@@ -400,6 +398,9 @@ impl DownTrack {
         }
     }
 
+    /// Creates a source description chunk for the track.
+    /// # Returns
+    /// A vector of source description chunks, or None if the track is not bound.
     pub async fn create_source_description_chunks(&self) -> Option<Vec<SourceDescriptionChunk>> {
         if !self.bound() {
             return None;
@@ -426,19 +427,23 @@ impl DownTrack {
         ])
     }
 
+    /// Current spatial layer of the track.
     pub fn current_spatial_layer(&self) -> i32 {
         self.current_spatial_layer.load(Ordering::Relaxed)
     }
 
+    /// ID of the track.
     pub fn id(&self) -> String {
         self.down_track_local.id.clone()
     }
 
+    /// Mime type of the track.
     pub async fn mime(&self) -> String {
         self.down_track_local.mime.lock().await.clone()
     }
 
-    /// If val is `true`, track is muted. Otherwise, track is enabled.
+    /// # Arguments
+    /// - `val`: If `true`, track is muted. Otherwise, track is enabled.
     pub fn mute(&self, val: bool) {
         if self.down_track_local.enabled.load(Ordering::Relaxed) != val {
             return;
@@ -449,7 +454,8 @@ impl DownTrack {
         }
     }
 
-    pub(super) fn new_track_local(peer_id: String, track: Arc<DownTrackInternal>) -> Self {
+    /// Creates a new simple `DownTrack` from a `DownTrackInternal` and the ID of the peer where this belongs to.
+    pub fn new_track_local(peer_id: String, track: Arc<DownTrackInternal>) -> Self {
         Self {
             peer_id,
             track_type: Mutex::new(DownTrackType::SimpleDownTrack),
@@ -471,27 +477,43 @@ impl DownTrack {
 
             transceiver: None,
             on_close_handler: Arc::default(),
-            close_once: Once::new(),
+            //close_once: Once::new(),
 
             octet_count: AtomicU32::default(),
             packet_count: AtomicU32::default(),
-            max_packet_ts: 0,
+            //max_packet_ts: 0,
             down_track_local: track,
         }
     }
 
+    /// Payload type of the track.
     pub async fn payload_type(&self) -> u8 {
         *self.down_track_local.payload_type.lock().await
     }
 
+    /// Registers a function to be called when the track is bound.
+    /// Alias for `DownTrackInternal::on_bind`.
     pub async fn register_on_bind(&self, f: OnBindFn) {
         self.down_track_local.on_bind(f).await
     }
+
+    /// Registers a function to be called when the track is closed.
     pub async fn register_on_close(&self, f: OnCloseFn) {
         let mut h = self.on_close_handler.lock().await;
         *h = Some(f);
     }
 
+    /// Sets the initial layers of the track.
+    /// # Example
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+    /// use volcano_sfu::track::downtrack::{DownTrack, DownTrackInternal};
+    /// 
+    /// let local_track = Arc::new(DownTrackInternal::new(RTCRtpCodecCapability::default(), receiver, 500));
+    /// let down_track = DownTrack::new_track_local("test".to_owned(), local_track);
+    /// down_track.set_initial_layers(0, 0);
+    /// ```
     pub fn set_initial_layers(&self, spatial_layer: i32, temporal_layer: i32) {
         self.current_spatial_layer
             .store(spatial_layer, Ordering::Relaxed);
@@ -501,33 +523,48 @@ impl DownTrack {
             .store(temporal_layer, Ordering::Relaxed);
     }
 
+    /// Atomically sets the last SSRC of the track.
     pub fn set_last_ssrc(&self, val: u32) {
         self.down_track_local
             .last_ssrc
             .store(val, Ordering::Release);
     }
 
+    /// Atomically sets the maximum spatial layer of the track.
     pub fn set_max_spatial_layer(&self, val: i32) {
         self.max_spatial_layer.store(val, Ordering::Release);
     }
 
+    /// Atomically sets the maximum temporal layer of the track.
     pub fn set_max_temporal_layer(&self, val: i32) {
         self.max_spatial_layer.store(val, Ordering::Release);
     }
 
+    /// Sets the track type of the track.
+    /// # Arguments
+    /// - `track_type`: DownTrackType::SimpleDownTrack or DownTrackType::SimulcastDownTrack.
     pub async fn set_track_type(&self, track_type: DownTrackType) {
         *self.track_type.lock().await = track_type;
     }
 
+    /// Sets the transceiver of the track.
     pub fn set_transceiver(&mut self, transceiver: Arc<RTCRtpTransceiver>) {
         self.transceiver = Some(transceiver)
     }
 
+    /// SSRC of the track.
     pub async fn ssrc(&self) -> u32 {
         let ssrc = self.down_track_local.ssrc.lock().await;
         *ssrc
     }
 
+    /// Atomically switches the spatial layer of the track.
+    /// # Arguments
+    /// - `target_layer`: Target spatial layer.
+    /// - `set_as_max`: If true, sets the target layer as the maximum spatial layer.
+    /// # Errors
+    /// - `Error::FullSpatialLayer` if the target layer is currently full.
+    /// - `Error::ErrWebRTC` if the error is from webrtc.
     pub async fn switch_spatial_layer(
         self: &Arc<Self>,
         target_layer: i32,
@@ -569,10 +606,19 @@ impl DownTrack {
         )))
     }
     
+    /// Atomically switches the spatial layer of the track.
+    /// No checks in the target layer are performed.
+    /// # Arguments
+    /// - `layer`: Target spatial layer.
     pub fn switch_spatial_layer_forced(&self, layer: i32) {
         self.current_spatial_layer.store(layer, Ordering::Relaxed);
     }
 
+    /// Atomically switches the temporal layer of the track.
+    /// Not working for simple tracks.
+    /// # Arguments
+    /// - `target_layer`: Target temporal layer.
+    /// - `set_as_max`: If true, sets the target layer as the maximum temporal layer.
     pub async fn switch_temporal_layer(&self, target_layer: i32, set_as_max: bool) {
         match *self.track_type.lock().await {
             DownTrackType::SimulcastDownTrack => {
@@ -600,11 +646,15 @@ impl DownTrack {
         }
     }
 
+    /// Requests the track to update its stats.
+    /// # Arguments
+    /// - `packet_len`: Length of the packet.
     pub fn update_stats(&self, packet_len: u32) {
         self.octet_count.store(packet_len, Ordering::Relaxed);
         self.packet_count.store(1, Ordering::Relaxed);
     }
 
+    /// Writes a raw RTP packet directly to the track.
     pub async fn write_raw_rtp(&self, pkt: rtp::packet::Packet) -> Result<()> {
         let write_stream_val = self.down_track_local.write_stream.lock().await;
         if let Some(write_stream) = &*write_stream_val {
@@ -614,6 +664,10 @@ impl DownTrack {
         Ok(())
     }
 
+    /// Writes an extended packet to the track.
+    /// # Arguments
+    /// - `pkt`: Extended packet.
+    /// - `layer`: Layer of the track.
     pub async fn write_rtp(&self, pkt: ExtPacket, layer: usize) -> Result<()> {
 
         if !self.down_track_local.enabled.load(Ordering::Relaxed) {
@@ -679,7 +733,7 @@ impl DownTrack {
         let new_sn = ext_packet.packet.header.sequence_number - *self.sn_offset.lock().await;
         let ts_offset = self.ts_offset.lock().await;
         let new_ts = ext_packet.packet.header.timestamp - *ts_offset;
-        let mut sequencer = self.down_track_local.sequencer.lock().await;
+        let sequencer = self.down_track_local.sequencer.lock().await;
         sequencer
             .push(
                 ext_packet.packet.header.sequence_number,
