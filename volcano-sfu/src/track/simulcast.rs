@@ -1,14 +1,18 @@
 use std::time::SystemTime;
 
+/// RID assigned for the quarter (the lowest) resolution.
 pub const QUARTER_RESOLUTION: &str = "q";
+
+/// RID assigned for the half resolution.
 pub const HALF_RESOLUTION: &str = "h";
+
+/// RID assigned for the full resolution.
 pub const FULL_RESOLUTION: &str = "f";
 
 pub struct SimulcastTrackHelpers {
     pub switch_delay: SystemTime,
     pub temporal_supported: bool,
-    #[allow(dead_code)]
-    temporal_enabled: bool,
+    //temporal_enabled: bool,
     pub l_ts_calc: i64,
 
     pub p_ref_pic_id: u16,
@@ -31,7 +35,7 @@ impl Default for SimulcastTrackHelpers {
         Self {
             switch_delay: SystemTime::now(),
             temporal_supported: false,
-            temporal_enabled: false,
+            //temporal_enabled: false,
             l_ts_calc: 0,
 
             p_ref_pic_id: 0,

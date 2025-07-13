@@ -494,12 +494,12 @@ impl DownTrack {
     }
 
     /// Registers a function to be called when the track is bound.
-    /// Alias for `DownTrackInternal::on_bind`.
+    /// Alias for [DownTrackInternal::on_bind].
     pub async fn register_on_bind(&self, f: OnBindFn) {
         self.down_track_local.on_bind(f).await
     }
 
-    /// Registers a function to be called when the track is closed.
+    /// Registers a function to be called when [Self::close] is called.
     pub async fn register_on_close(&self, f: OnCloseFn) {
         let mut h = self.on_close_handler.lock().await;
         *h = Some(f);
@@ -544,9 +544,7 @@ impl DownTrack {
         self.max_spatial_layer.store(val, Ordering::Release);
     }
 
-    /// Sets the track type of the track.
-    /// # Arguments
-    /// - `track_type`: DownTrackType::SimpleDownTrack or DownTrackType::SimulcastDownTrack.
+    /// Sets the [DownTrackType] of the track.
     pub async fn set_track_type(&self, track_type: DownTrackType) {
         *self.track_type.lock().await = track_type;
     }
