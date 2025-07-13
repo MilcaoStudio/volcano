@@ -267,7 +267,7 @@ impl Receiver for WebRTCReceiver {
             }
         }
 
-        return 0;
+        0
     }
 
     async fn add_up_track(
@@ -337,8 +337,6 @@ impl Receiver for WebRTCReceiver {
         }
 
         Some(layer)
-
-        // tokio::spawn(async move { self.write_rtp(layer) });
     }
 
     async fn add_down_track(&self, track: Arc<DownTrack>, best_quality_first: bool) -> Result<()> {
@@ -649,6 +647,8 @@ impl Receiver for WebRTCReceiver {
 
 impl WebRTCReceiver {
     
+    /// Closes all the not available tracks of the receiver, and set the receiver to closed state.
+    /// Calls the on_close handler if it is set.
     pub async fn close_tracks(&self) {
         for (idx, a) in self.available.lock().await.iter().enumerate() {
             if a.load(Ordering::Relaxed) {
