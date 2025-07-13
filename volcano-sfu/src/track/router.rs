@@ -53,7 +53,7 @@ pub struct LocalRouter {
     rtcp_receiver_channel: Arc<Mutex<RtcpDataReceiver>>,
     stop_sender_channel: Arc<Sender<()>>,
     config: RouterConfig,
-    receivers: Arc<Mutex<DashMap<String, Arc<dyn Receiver + Send + Sync>>>>,
+    receivers: Arc<Mutex<DashMap<String, Arc<WebRTCReceiver>>>>,
     buffer_factory: AtomicFactory,
     rtcp_writer_handler: Arc<Mutex<Option<RtcpWriterFn>>>,
     room: Arc<Room>,
@@ -86,11 +86,6 @@ impl LocalRouter {
             on_del_receiver_track_handler: Arc::new(Mutex::new(None)),
         }
     }
-
-    /*
-    fn get_receivers(&self) -> Arc<Mutex<DashMap<String, Arc<dyn Receiver + Send + Sync>>>> {
-        self.receivers.clone()
-    }*/
 
     pub async fn register_on_add_receiver_track(&self, f: OnAddReciverTrackFn) {
         let mut handler = self.on_add_receiver_track_handler.lock().await;
@@ -389,9 +384,9 @@ impl LocalRouter {
             }))
             .await;
         let receivers = self.receivers.lock().await;
-        let result_receiver;
+        let arc_receiver;
         match receivers.get(&track.id()) {
-            Some(r) => result_receiver = r.clone(),
+            Some(r) => arc_receiver = r.clone(),
             None => {
                 let mut rv =
                     WebRTCReceiver::new(receiver.clone(), track.clone(), self.id.clone()).await;
@@ -414,16 +409,16 @@ impl LocalRouter {
                     })
                 }))
                 .await;
-                result_receiver = Arc::new(rv);
-                receivers.insert(track_id, result_receiver.clone());
+                arc_receiver = Arc::new(rv);
+                receivers.insert(track_id, arc_receiver.clone());
                 published = true;
                 info!("Track {} published", track.id());
                 if let Some(f) = &mut *self.on_add_receiver_track_handler.lock().await {
-                    let _ = f(result_receiver.clone()).await;
+                    let _ = f(arc_receiver.clone()).await;
                 }
             }
         }
-        let layer = result_receiver
+        let layer = arc_receiver
             .add_up_track(
                 track.clone(),
                 buffer.clone(),
@@ -432,7 +427,7 @@ impl LocalRouter {
             .await;
 
         if let Some(layer_val) = layer {
-            let receiver_clone = result_receiver.clone();
+            let receiver_clone = arc_receiver.clone();
             tokio::spawn(async move { receiver_clone.write_rtp(layer_val).await });
         }
 
@@ -458,7 +453,7 @@ impl LocalRouter {
                 }
             }
         });
-        (result_receiver, published)
+        (arc_receiver, published)
     }
 
     pub async fn start_audio_observer_task(&self) {
@@ -525,6 +520,17 @@ impl LocalRouter {
         }
     }
     pub async fn stop(&self) {
+        
+        // Close all receivers
+        info!("[Router {}] Stopping receivers", self.id);
+        for item in self.receivers.lock().await.iter() {
+            let id = item.key();
+            let receiver = item.value();
+            
+            info!("[Router {}] Closing receiver {}", self.id, id);
+            receiver.close_tracks().await;
+        }
+
         if let Err(err) = self.stop_sender_channel.send(()) {
             error!("stop err: {}", err);
         }
