@@ -251,8 +251,8 @@ impl Subscriber {
                 if !dt.bound() {
                     continue;
                 }
-                if let Some(dcs) = dt.create_source_description_chunks().await {
-                    sds.append(&mut dcs.clone());
+                if let Some(dcs) = dt.create_source_description_chunks().await.as_mut() {
+                    sds.append(dcs);
                 }
             }
         }
@@ -265,17 +265,13 @@ impl Subscriber {
 
         let pc_out = self.pc.clone();
 
+        let id = self.id.clone();
         tokio::spawn(async move {
-            let mut i = 0;
-            loop {
+            for i in 1..6 {
+                debug!("[Subscriber {id}] Send source description ({i}/6)");
                 if let Err(err) = pc_out.write_rtcp(&rtcp_packets[..]).await {
-                    log::error!("write rtcp error: {}", err);
+                    warn!("write rtcp error: {}", err);
                 }
-
-                if i > 5 {
-                    return;
-                }
-                i += 1;
 
                 sleep(Duration::from_millis(20)).await;
             }
