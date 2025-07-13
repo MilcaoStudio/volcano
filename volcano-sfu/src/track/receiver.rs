@@ -154,7 +154,7 @@ pub trait Receiver: Send + Sync {
     /// Awaits for incoming packets from a given layer and writes RTP packets.
     /// 
     /// ## Blocking
-    /// It is recommended to use this function in an async task.
+    /// It is recommended to use this function inside an async task.
     ///
     /// # Arguments
     /// - `layer`: Target layer.
