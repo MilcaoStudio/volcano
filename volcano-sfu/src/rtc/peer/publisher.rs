@@ -183,7 +183,7 @@ impl Publisher {
                     info!("Track {} from stream {} received", track_id, track_stream_id);
 
                     let (r, publish) = router_in
-                        .add_receiver(receiver, track_clone.clone(), track_id, track_stream_id)
+                        .add_receiver(receiver, track_clone.clone(),)
                         .await;
                     debug!("Add track receiver with track {} into router", r.track_id());
                     let receiver_clone = r.clone();

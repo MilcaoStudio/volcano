@@ -240,40 +240,45 @@ impl LocalRouter {
             .map(|_| down_track_arc)
     }
 
+    /// Copies the tracks from `receiver` to `subscriber`. Then, copies all the tracks from the router's receivers to `subscriber`.
+    /// 
+    /// This operation is skipped if [Subscriber::no_auto_subscribe] is true.
+    /// # Arguments
+    /// - `subscriber`: [Subscriber] to add the tracks to.
+    /// - `receiver`: [Receiver] to copy the tracks from.
+    /// 
+    /// # Returns
+    /// - `Ok(())` if the operation was successful (or skipped).
+    /// - `Err(Error)` if the operation failed (e.g. subscriber's negotiation failed).
     pub async fn add_down_tracks(
         &self,
         subscriber: Arc<Subscriber>,
-        r: Option<Arc<dyn Receiver>>,
+        receiver: Option<Arc<dyn Receiver>>,
     ) -> Result<()> {
         if subscriber.no_auto_subscribe {
             info!("Router[{}] add_down_tracks Subscriber skips [no_auto_subscribe]", self.id);
             return Ok(());
         }
 
-        if let Some(receiver) = r {
+        if let Some(receiver) = receiver {
             info!(
-                "[Router {}] add_down_tracks Subscriber {} requests a downtrack",
+                "[Router {}] add_down_tracks Subscriber {} adds a downtrack from receiver",
                 self.id,
                 subscriber.id
             );
             if let Err(err) = self.add_down_track(subscriber.clone(), receiver).await {
                 error!("add_down_track err: {}", err);
             };
-            subscriber.negotiate(None).await?;
-            return Ok(());
+            return subscriber.negotiate(None).await;
         }
 
-        let mut recs = Vec::new();
-        {
-            let receivers = self.receivers.lock().await;
-            for receiver in receivers.iter() {
-                recs.push(receiver.clone())
-            }
-        }
+        let recs = self.receivers.lock().await
+            .iter().map(|r| r.clone())
+            .collect::<Vec<_>>();
 
         if !recs.is_empty() {
-            info!("Add downtracks from stored receivers to subscriber");
-            for val in recs {
+            info!("[Router {}] Subscriber {} adds downtracks from stored receivers", self.id, subscriber.id);
+            for val in &recs {
                 if let Err(err) = self.add_down_track(subscriber.clone(), val.clone()).await {
                     error!("add_down_track err: {}", err);
                 };
@@ -284,16 +289,34 @@ impl LocalRouter {
         Ok(())
     }
 
+    /// Adds a new [Receiver] to this router if it doesn't exist, otherwise, returns the existing receiver.
+    /// 
+    /// # Audio level detection
+    /// If `track`'s kind is [RTPCodecType::Audio], [Self::audio_observer] will observe audio levels of the track.
+    /// 
+    /// # RTP listener
+    /// Every RTP packet received by `track` will be forwarded to a buffer.
+    /// 
+    /// # Arguments
+    /// - `receiver`: [RTCRtpReceiver] used to create the [Receiver].
+    /// - `track`: [TrackRemote] where RTP packets will be read from.
+    /// 
+    /// # Returns
+    /// (receiver, published)
+    /// - `receiver`: [Receiver] that was created.
+    /// - `published`: Whether the receiver was created or got from the cache.
     pub async fn add_receiver(
         self: &Arc<Self>,
         receiver: Arc<RTCRtpReceiver>,
         track: Arc<TrackRemote>,
-        track_id: String,
-        stream_id: String,
+        //track_id: String,
+        //stream_id: String,
     ) -> (Arc<dyn Receiver>, bool) {
+        let track_id = track.id();
+        let stream_id = track.stream_id();
         info!(
             "add_receiver -> track {}, stream: {}",
-            track.id(),
+            track_id,
             stream_id
         );
         let mut published = false;
@@ -314,19 +337,18 @@ impl LocalRouter {
 
         match track.kind() {
             RTPCodecType::Audio => {
-                let router_out = self.clone();
+                let audio_observer = self.audio_observer.clone();
                 let stream_id_out = stream_id.clone();
                 buffer
                     .register_on_audio_level(Box::new(move |voice, level| {
-                        let router_in = router_out.clone();
+                        let audio_observer_in = audio_observer.clone();
                         let stream_id_in = stream_id_out.clone();
                         Box::pin(async move {
                             if !voice {
                                 debug!("Skip observation");
                                 return;
                             }
-                            router_in
-                                .audio_observer
+                            audio_observer_in
                                 .lock()
                                 .await
                                 .observe(&stream_id_in, level)
@@ -335,11 +357,10 @@ impl LocalRouter {
                     }))
                     .await;
                 debug!(
-                    "[Room {}] add stream {} to audio observer",
-                    self.room.id, stream_id
+                    "[Router {}] add stream {} to audio observer",
+                    self.id, stream_id
                 );
-                let router_2 = self.clone();
-                router_2
+                self
                     .audio_observer
                     .lock()
                     .await
@@ -347,7 +368,7 @@ impl LocalRouter {
                     .await;
             }
             RTPCodecType::Video => {
-                debug!("Video tracking not implemented");
+                // TODO: implement video rotation detection
             }
             _ => {}
         }
@@ -400,7 +421,7 @@ impl LocalRouter {
             .await;
         let receivers = self.receivers.lock().await;
         let arc_receiver;
-        match receivers.get(&track.id()) {
+        match receivers.get(&track_id) {
             Some(r) => arc_receiver = r.clone(),
             None => {
                 let mut rv =
@@ -471,6 +492,11 @@ impl LocalRouter {
         (arc_receiver, published)
     }
 
+    /// Starts a task that observes audio levels of the tracks in this router.
+    /// 
+    /// Fires [RoomEvent::VoiceActivity] when audio activity from streams changes.
+    /// 
+    /// Stops when `stop` signal is received.
     pub async fn start_audio_observer_task(&self) {
         let mut stop_receiver = self.stop_sender_channel.subscribe();
         let id_out = self.id.clone();
@@ -507,13 +533,15 @@ impl LocalRouter {
                 }
             }
         });
-        info!("Audio observer task started");
     }
 
+    /// Sets the function to be called when an RTCP packet is received.
     pub async fn set_rtcp_writer(&self, writer: RtcpWriterFn) {
         let mut handler = self.rtcp_writer_handler.lock().await;
         *handler = Some(writer);
     }
+
+    /// Forwards RTCP packets to the RTCP writer.
     pub async fn send_rtcp(&self) {
         let mut stop = self.stop_sender_channel.subscribe();
         let mut rtcp_receiver = self.rtcp_receiver_channel.lock().await;
@@ -534,9 +562,10 @@ impl LocalRouter {
             };
         }
     }
+
+    /// Sends `stop` signal in this router, and safely closes all receivers.
     pub async fn stop(&self) {
         
-        // Close all receivers
         info!("[Router {}] Stopping receivers", self.id);
         for item in self.receivers.lock().await.iter() {
             let id = item.key();
@@ -546,6 +575,15 @@ impl LocalRouter {
             receiver.close_tracks().await;
         }
 
+        if let Err(err) = self.stop_sender_channel.send(()) {
+            error!("stop err: {}", err);
+        }
+    }
+}
+
+
+impl Drop for LocalRouter {
+    fn drop(&mut self) {
         if let Err(err) = self.stop_sender_channel.send(()) {
             error!("stop err: {}", err);
         }
