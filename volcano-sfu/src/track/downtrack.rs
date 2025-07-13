@@ -44,7 +44,9 @@ pub type OnBindFn =
 #[derive(Default, Clone)]
 pub enum DownTrackType {
     #[default]
+    /// Simple down track. It should be assigned to layer 0.
     SimpleDownTrack,
+    /// Simulcast down track. It should be assigned in a layer between 0 and 2.
     SimulcastDownTrack,
 }
 
@@ -510,7 +512,9 @@ impl DownTrack {
     /// use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
     /// use volcano_sfu::track::downtrack::{DownTrack, DownTrackInternal};
     /// 
-    /// let local_track = Arc::new(DownTrackInternal::new(RTCRtpCodecCapability::default(), receiver, 500));
+    /// let local_track = Arc::new(
+    ///     DownTrackInternal::new(RTCRtpCodecCapability::default(), receiver, 500)
+    /// );
     /// let down_track = DownTrack::new_track_local("test".to_owned(), local_track);
     /// down_track.set_initial_layers(0, 0);
     /// ```
@@ -667,7 +671,7 @@ impl DownTrack {
     /// Writes an extended packet to the track.
     /// # Arguments
     /// - `pkt`: Extended packet.
-    /// - `layer`: Layer of the track.
+    /// - `layer`: Layer of the track (ignored for simple tracks).
     pub async fn write_rtp(&self, pkt: ExtPacket, layer: usize) -> Result<()> {
 
         if !self.down_track_local.enabled.load(Ordering::Relaxed) {
