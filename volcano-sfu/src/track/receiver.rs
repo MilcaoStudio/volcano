@@ -88,10 +88,10 @@ pub trait Receiver: Send + Sync {
         best_quality_first: bool,
     ) -> Option<usize>;
 
-    /// Stores a downstream track (`DownTrack`) in this receiver.
+    /// Stores a downstream track [DownTrack] in this receiver.
     ///
     /// # Arguments
-    /// - `track`: Reference to the `DownTrack`.
+    /// - `track`: [Downtrack] to store.
     /// - `best_quality_first`: Stores the track in the highest quality layer available (only used for simulcast).
     async fn add_down_track(&self, track: Arc<DownTrack>, best_quality_first: bool) -> Result<()>;
 
