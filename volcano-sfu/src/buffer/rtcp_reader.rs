@@ -26,13 +26,13 @@ impl RTCPReader {
 
     /// Sets `on_packet` callback.
     /// This callback will be called from #write.
-    pub async fn register_on_packet(&mut self, f: OnPacketFn) {
+    pub async fn register_on_packet(&self, f: OnPacketFn) {
         let mut on_packet = self.on_packet_handler.lock().await;
         *on_packet = Some(f);
     }
 
     /// Calls `on_packet` with the given data.
-    pub async fn write(&mut self, p: Vec<u8>) -> Result<u32> {
+    pub async fn write(&self, p: Vec<u8>) -> Result<u32> {
 
         info!("Calling on_packet_handler");
 

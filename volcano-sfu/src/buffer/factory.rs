@@ -6,12 +6,8 @@ use tokio::sync::Mutex;
 
 #[derive(Default)]
 pub struct Factory {
-    #[allow(dead_code)]
-    video_pool_size: usize,
-    #[allow(dead_code)]
-    audio_pool_size: usize,
     pub rtp_buffers: HashMap<u32, Arc<AtomicBuffer>>,
-    pub rtcp_readers: HashMap<u32, Arc<Mutex<RTCPReader>>>,
+    pub rtcp_readers: HashMap<u32, Arc<RTCPReader>>,
 }
 
 #[derive(Default)]
@@ -20,39 +16,23 @@ pub struct AtomicFactory {
 }
 
 impl AtomicFactory {
-    pub fn new(video_pool_size: usize, audio_pool_size: usize) -> Self {
-        Self {
-            factory: Arc::new(Mutex::new(Factory {
-                video_pool_size,
-                audio_pool_size,
-                ..Default::default()
-            })),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub async fn get_or_new_rtcp_buffer(&self, ssrc: u32) -> Arc<Mutex<RTCPReader>> {
-        let factory = &mut self.factory.lock().await;
-
-        if let Some(reader) = factory.rtcp_readers.get_mut(&ssrc) {
-            return reader.clone();
-        }
-
-        let reader = Arc::new(Mutex::new(RTCPReader::new(ssrc)));
-        factory.rtcp_readers.insert(ssrc, reader.clone());
-
-        reader
+    pub async fn get_or_new_rtcp_buffer(&self, ssrc: u32) -> Arc<RTCPReader> {
+        let mut factory = self.factory.lock().await;
+        let entry = factory.rtcp_readers.entry(ssrc);
+        entry.or_insert(Arc::new(
+            RTCPReader::new(ssrc)
+        )).clone()
     }
 
     pub async fn get_or_new_buffer(&self, ssrc: u32) -> Arc<AtomicBuffer> {
-        let factory = &mut self.factory.lock().await;
-
-        if let Some(reader) = factory.rtp_buffers.get_mut(&ssrc) {
-            return reader.clone();
-        }
-
-        let reader = Arc::new(AtomicBuffer::new(ssrc));
-        factory.rtp_buffers.insert(ssrc, reader.clone());
-
-        reader
+        let mut factory = self.factory.lock().await;
+        let entry = factory.rtp_buffers.entry(ssrc);
+        entry.or_insert(Arc::new(
+            AtomicBuffer::new(ssrc)
+        )).clone()
     }
 }

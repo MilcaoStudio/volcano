@@ -69,7 +69,7 @@ pub struct DownTrackInternal {
     max_track: i32,
     payload_type: Mutex<u8>,
     sequencer: Arc<Mutex<AtomicSequencer>>,
-    buffer_factory: Mutex<AtomicFactory>,
+    buffer_factory: AtomicFactory,
     /// Whether the track is enabled (unmuted).
     pub enabled: AtomicBool,
     /// Whether the track is re-synced.
@@ -100,7 +100,7 @@ impl DownTrackInternal {
             max_track,
             payload_type: Mutex::default(),
             sequencer: Arc::default(),
-            buffer_factory: Mutex::new(AtomicFactory::new(1000, 1000)),
+            buffer_factory: AtomicFactory::default(),
             enabled: AtomicBool::default(),
             re_sync: AtomicBool::default(),
             last_ssrc: AtomicU32::default(),
@@ -252,10 +252,8 @@ impl TrackLocal for DownTrackInternal {
         *mime = codec.capability.mime_type.to_lowercase();
         self.re_sync.store(true, Ordering::Relaxed);
         self.enabled.store(true, Ordering::Relaxed);
-        let buffer_factory = self.buffer_factory.lock().await;
 
-        let rtcp_buffer = buffer_factory.get_or_new_rtcp_buffer(t.ssrc()).await;
-        let mut rtcp = rtcp_buffer.lock().await;
+        let rtcp = self.buffer_factory.get_or_new_rtcp_buffer(t.ssrc()).await;
 
         let enabled = self.enabled.load(Ordering::Relaxed);
         let last_ssrc = self.last_ssrc.load(Ordering::Relaxed);

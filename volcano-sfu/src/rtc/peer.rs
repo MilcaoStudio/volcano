@@ -19,11 +19,7 @@ use webrtc::{
     },
 };
 
-use crate::{
-    buffer::AtomicFactory,
-    rtc::peer::publisher::Publisher,
-};
-
+use crate::rtc::peer::publisher::Publisher;
 
 use super::{config::WebRTCTransportConfig, room::Room};
 use crate::track::error::Error;
@@ -32,7 +28,6 @@ mod api;
 mod publisher;
 pub mod subscriber;
 
-// Callbacks
 pub type OnOfferFn = Box<
     dyn (FnMut(RTCSessionDescription) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
         + Send
@@ -153,7 +148,7 @@ impl Peer {
             configuration: rtc_config_clone,
             setting: self.config.setting.clone(),
             router: self.config.router.clone(),
-            factory: Arc::new(Mutex::new(AtomicFactory::new(1000, 1000))),
+            factory: Arc::default(),
             version: self.config.version.clone(),
         };
 

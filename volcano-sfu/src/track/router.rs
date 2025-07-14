@@ -84,7 +84,7 @@ impl LocalRouter {
             config,
             receivers: Arc::new(Mutex::new(DashMap::new())),
             room,
-            buffer_factory: AtomicFactory::new(100, 100),
+            buffer_factory: AtomicFactory::default(),
             rtcp_writer_handler: Arc::new(Mutex::new(None)),
             on_add_receiver_track_handler: Arc::new(Mutex::new(None)),
             on_del_receiver_track_handler: Arc::new(Mutex::new(None)),
@@ -303,8 +303,8 @@ impl LocalRouter {
     /// 
     /// # Returns
     /// (receiver, published)
-    /// - `receiver`: [Receiver] that was created.
-    /// - `published`: Whether the receiver was created or got from the cache.
+    /// - `receiver`: [Receiver] that was created or fetched.
+    /// - `published`: Whether the receiver was created or fetched.
     pub async fn add_receiver(
         self: &Arc<Self>,
         receiver: Arc<RTCRtpReceiver>,
@@ -384,8 +384,6 @@ impl LocalRouter {
         let buffer_out = Arc::clone(&buffer);
         let with_status = self.config.with_stats;
         rtcp_reader
-            .lock()
-            .await
             .register_on_packet(Box::new(move |packet: Vec<u8>| {
                 let buffer_in = Arc::clone(&buffer_out);
                 Box::pin(async move {
@@ -481,12 +479,10 @@ impl LocalRouter {
 
             while let Ok((pkt, _)) = track.read(&mut b).await {
                 let tmp_b = b.clone();
-                if let Err(err) = rtcp_reader.lock().await.write(tmp_b).await {
+                if let Err(err) = rtcp_reader.write(tmp_b).await {
                     error!("rtcp_reader write error: {}", err);
                 };
-                if let Err(err) = buffer_clone.write(pkt).await {
-                    error!("write error: {}", err);
-                }
+                buffer_clone.write(pkt).await;
             }
         });
         (arc_receiver, published)
