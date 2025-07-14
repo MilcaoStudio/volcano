@@ -88,16 +88,16 @@ pub trait Receiver: Send + Sync {
         best_quality_first: bool,
     ) -> Option<usize>;
 
-    /// Stores a downstream track [DownTrack] in this receiver.
+    /// Stores a [DownTrack] in this receiver.
     ///
     /// # Arguments
-    /// - `track`: [Downtrack] to store.
+    /// - `track`: [DownTrack] to store.
     /// - `best_quality_first`: Stores the track in the highest quality layer available (only used for simulcast).
     async fn add_down_track(&self, track: Arc<DownTrack>, best_quality_first: bool) -> Result<()>;
 
-    /// Adds a downstream track (`DownTrack`) to the given layer, if the layer is available.
+    /// Adds a [DownTrack] to the given layer, if the layer is available.
     /// # Arguments
-    /// - `track`: Reference to the `DownTrack`.
+    /// - `track`: [DownTrack] to add.
     /// - `layer`: Layer to add the track to.
     /// # Errors
     /// - `Error::ReceiverLayerNotAvailable` if the layer is not available.
@@ -110,21 +110,19 @@ pub trait Receiver: Send + Sync {
     /// Returns the maximum temporal layer of each layer.
     async fn get_max_temporal_layers(&self) -> Vec<i32>;
 
-    /// Retransmits all packets from a given track.
+    /// Retransmits all given packets into a given [DownTrack].
     /// # Arguments
-    /// - `track`: Reference to the `DownTrack`.
+    /// - `track`: [DownTrack] used to retransmit packets.
     /// - `packets`: Packets to retransmit.
     async fn retransmit_packets(&self, track: Arc<DownTrack>, packets: &[PacketMeta]) -> Result<()>;
 
-    /// Deletes and closes a down track from a given layer.
+    /// Deletes and closes a [DownTrack] from a given layer.
     /// # Arguments
     /// - `layer`: Layer of the down track.
     /// - `id`: ID of the down track.
     async fn delete_down_track(&self, layer: usize, id: String) -> Result<()>;
 
     /// Registers a function to be called when the receiver is closed.
-    /// # Arguments
-    /// - `f`: Function to be called when the receiver is closed.
     async fn register_on_close(&self, f: OnCloseHandlerFn);
 
     /// Sends RTCP packets to the receiver.
