@@ -14,6 +14,8 @@ pub enum BufferError {
     ErrRTXPacket,
     #[error("packet is not large enough")]
     ErrShortPacket,
+    #[error("packet is too large")]
+    ErrLargePacket,
     #[error("invalid nil packet")]
     ErrNilPacket,
     #[error("io EOF")]

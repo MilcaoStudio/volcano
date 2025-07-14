@@ -58,7 +58,7 @@ pub enum BufferPacketType {
 #[async_trait]
 pub trait BufferIO {
     async fn read(&mut self) -> Result<Packet>;
-    async fn write(&self, pkt: Packet) -> Result<u32>;
+    async fn write(&self, pkt: Packet);
     async fn close(&self) -> Result<()>;
 }
 
@@ -182,7 +182,7 @@ pub struct AtomicBuffer {
 #[async_trait]
 impl BufferIO for AtomicBuffer {
      /// Adds a RTP Packet, out of order, new packet may be arrived later
-     async fn write(&self, pkt: Packet) -> Result<u32> {
+     async fn write(&self, pkt: Packet) {
         {
             let mut buffer = self.buffer.lock().await;
 
@@ -192,14 +192,12 @@ impl BufferIO for AtomicBuffer {
                     packet: pkt.clone(),
                 });
 
-                return Ok(0);
+                return;
             }
         }
 
         self.calc(pkt, Instant::now().elapsed().subsec_nanos() as i64)
             .await;
-
-        Ok(0)
     }
 
     async fn read(&mut self) -> Result<Packet> {
@@ -361,7 +359,6 @@ impl AtomicBuffer {
     }
 
     pub async fn calc(&self, packet: Packet, arrival_time: i64) {
-        //let codc_type = self.buffer.lock().await.codec_type; //= RTPCodecType::Video;
         let buffer = &mut self.buffer.lock().await;
         let sn = packet.header.sequence_number;
         let distance = bucket::distance(sn, buffer.max_seq_no);
@@ -407,33 +404,13 @@ impl AtomicBuffer {
             }
         }
 
-        let content = packet.to_string();
-        let pkt = content.as_bytes();
+        let pkt = &packet.payload;
         let max_seq_no = buffer.max_seq_no;
         if let Some(bucket) = &mut buffer.bucket {
             let rv = bucket.add_packet(pkt, sn, sn == max_seq_no);
             if let Err(err) = rv {
                 error!("{err}");
             }
-            /* 
-            match rv {
-                Ok(data) => match Packet::unmarshal(&mut &data[..]) {
-                    Err(_) => {
-                        return;
-                    }
-                    Ok(p) => {
-                        if codc_type == RTPCodecType::Video {
-                            debug!("calc packet size: {}", data.len());
-                        }
-                        packet = p;
-                    }
-                },
-                Err(err) => {
-                    //  if Error::ErrRTXPacket.equal(&rv) {
-                    error!("add packet err: {}", err);
-                    return;
-                }
-            }*/
         }
 
         buffer.stats.total_byte += pkt.len() as u64;
