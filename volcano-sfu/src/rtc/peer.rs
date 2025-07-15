@@ -164,7 +164,7 @@ impl Peer {
             let closed_out = self.closed.clone();
             //let closed_out_2 = self.closed.clone();
             let sub = Arc::clone(&subscriber);
-            //let sub_2 = Arc::clone(&subscriber);
+            let sub_2 = Arc::clone(&subscriber);
             let on_offer_handler_out = self.on_offer_fn.clone();
             //let on_offer_handler_out_2 = self.on_offer_fn.clone();
             let id_clone_out = id.clone();
@@ -199,7 +199,15 @@ impl Peer {
                     })
                 }))
                 .await;
-          
+            subscriber.pc.on_negotiation_needed(Box::new(move || {
+                let sub_in = sub_2.clone();
+                let offer = RTCOfferOptions { voice_activity_detection: true, ice_restart: true };
+                Box::pin(async move {
+                    if let Err(err) = sub_in.negotiate(Some(offer)).await {
+                        error!("negotiate err: {}", err);
+                    }
+                })
+            }));
             let on_ice_candidate_out = self.on_ice_candidate_fn.clone();
             let closed_out_ = self.closed.clone();
             subscriber.register_on_ice_candidate(Box::new(move |candidate| {
