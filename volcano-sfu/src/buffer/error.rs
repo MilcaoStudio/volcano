@@ -20,7 +20,7 @@ pub enum BufferError {
     ErrNilPacket,
     #[error("io EOF")]
     ErrIOEof,
-    #[error("rtcp error")]
+    #[error("rtcp error {0}")]
     ErrRTCP(RTCPError),
 }
 

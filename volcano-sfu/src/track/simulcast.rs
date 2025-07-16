@@ -13,7 +13,8 @@ pub struct SimulcastTrackHelpers {
     pub switch_delay: SystemTime,
     pub temporal_supported: bool,
     //temporal_enabled: bool,
-    pub l_ts_calc: i64,
+    /// Last timestamp calculated (in nanoseconds).
+    pub l_ts_calc: u32,
 
     pub p_ref_pic_id: u16,
     pub ref_pic_id: u16,

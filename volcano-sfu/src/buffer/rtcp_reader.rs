@@ -3,7 +3,6 @@ use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-
 use super::error::Result;
 
 pub type OnPacketFn = Box<
@@ -33,9 +32,6 @@ impl RTCPReader {
 
     /// Calls `on_packet` with the given data.
     pub async fn write(&self, p: Vec<u8>) -> Result<u32> {
-
-        info!("Calling on_packet_handler");
-
         let mut handler = self.on_packet_handler.lock().await;
         if let Some(h) = &mut *handler {
             h(p).await?;

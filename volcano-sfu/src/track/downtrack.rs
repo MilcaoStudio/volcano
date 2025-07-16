@@ -202,15 +202,14 @@ impl DownTrackInternal {
             else if let Some(transport_layer_nack) = pkt.as_any().downcast_ref::<rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack>()
             {
                 let mut nacked_packets:Vec<PacketMeta> = Vec::new();
-                for pair in &transport_layer_nack.nacks{
-
-                                 let seq_numbers = pair.packet_list();
-                     let sequencer2 = sequencer.lock().await;
-                     let mut pairs= sequencer2.get_seq_no_pairs(&seq_numbers[..]).await;
+                for pair in &transport_layer_nack.nacks {
+                    let seq_numbers = pair.packet_list();
+                    let sequencer2 = sequencer.lock().await;
+                    let mut pairs= sequencer2.get_seq_no_pairs(&seq_numbers[..]).await;
                     nacked_packets.append(&mut pairs);
-                    //todo
                 }
 
+                warn!("Packet retransmition disabled. Could not retransmit {} packets.", nacked_packets.len());
              //   receiver.retransmit_packets(track, packets)
 
             }
