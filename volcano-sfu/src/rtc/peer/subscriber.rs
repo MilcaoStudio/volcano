@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::Mutex;
@@ -35,12 +36,15 @@ pub struct Subscriber {
     pub m: Arc<Mutex<MediaEngine>>,
 
     api_channel: Arc<RTCDataChannel>,
+    config: Arc<WebRTCTransportConfig>,
     tracks: Arc<Mutex<HashMap<String, Vec<Arc<DownTrack>>>>>,
     channels: Arc<Mutex<HashMap<String, Arc<RTCDataChannel>>>>,
     candidates: Arc<Mutex<Vec<RTCIceCandidateInit>>>,
     on_negotiate: Arc<Mutex<Option<OnNegotiateFn>>>,
     on_renegotiate: Arc<Mutex<Option<OnRenegotiateFn>>>,
     pub no_auto_subscribe: bool,
+    negotiation_pending: AtomicBool,
+    api_channel_open: Arc<AtomicBool>,
 }
 
 pub type OnNegotiateFn =
@@ -49,13 +53,14 @@ pub type OnRenegotiateFn =
     Box<dyn (FnMut(bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>) + Send + Sync>;
 
 impl Subscriber {
-    pub async fn new(id: String, c: &Arc<WebRTCTransportConfig>) -> Result<Self> {
-        let pc = api::create_subscriber_connection(c).await?;
-        let api_channel = pc.create_data_channel(API_CHANNEL_LABEL, Some(RTCDataChannelInit::default())).await?;
-        info!("[Subscriber {id}] Created data channel `{API_CHANNEL_LABEL}` (awaiting for offer)");
+    pub async fn new(id: String, config: Arc<WebRTCTransportConfig>) -> Result<Self> {
+        let pc = api::create_subscriber_connection(&config.clone()).await?;
+        let open = Arc::new(AtomicBool::default());
+        let api_channel = Self::create_api_data_channel(&pc, open.clone()).await?;
 
         let subscriber = Subscriber {
             api_channel,
+            config,
             id,
             pc,
             m: Default::default(),
@@ -65,8 +70,9 @@ impl Subscriber {
             on_negotiate: Default::default(),
             on_renegotiate: Default::default(),
             no_auto_subscribe: Default::default(),
+            negotiation_pending: Default::default(),
+            api_channel_open: open,
         };
-        subscriber.on_ice_connection_state_change().await;
         Ok(subscriber)
     }
 
@@ -114,6 +120,33 @@ impl Subscriber {
         Ok(())
     }
 
+    async fn create_api_data_channel(pc: &RTCPeerConnection, open: Arc<AtomicBool>) -> Result<Arc<RTCDataChannel>> {
+        let api = pc.create_data_channel(API_CHANNEL_LABEL, Some(RTCDataChannelInit::default())).await;
+        info!("[Subscriber] Created data channel `{API_CHANNEL_LABEL}` (awaiting for offer)");
+        match api {
+            Ok(channel) => {
+
+                let open_1 = open.clone();
+                channel.on_open(Box::new(move || {
+                    Box::pin(async move {
+                        open_1.store(true, Ordering::Release);
+                    })
+                }));
+
+                let open_2 = open.clone();
+                channel.on_close(Box::new(move || {
+                    let open_in = open_2.clone();
+                    Box::pin(async move {
+                        open_in.store(false, Ordering::Release);
+                    })
+                }));
+
+                Ok(channel)
+            },
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub async fn close(&self) {
         if let Err(err) = self.pc.close().await {
             error!("subscriber peer close error: {err}");
@@ -134,6 +167,7 @@ impl Subscriber {
         Ok(data_channel)
     }
 
+    /// Creates an offer for this peer connection and sets it as the local description.
     pub async fn create_offer(&self, options: Option<RTCOfferOptions>) -> Result<RTCSessionDescription> {
         let offer = self.pc.create_offer(options).await?;
         self.pc.set_local_description(offer.clone()).await?;
@@ -141,14 +175,14 @@ impl Subscriber {
     }
 
     pub async fn add_down_track(&self, stream_id: String, down_track: Arc<DownTrack>) {
-        info!("subscriber::add_down_track");
+        let id = &self.id;
         let mut tracks = self.tracks.lock().await;
         if let Some(dt) = tracks.get_mut(&stream_id) {
-            info!("subscriber:::add_down_track push into stream {stream_id}");
+            info!("[Subscriber {id}] add_down_track push into stream {stream_id}");
             dt.push(down_track);
             return;
         }
-        info!("subscriber::add_down_track add stream {stream_id} with 0 tracks");
+        info!("[Subscriber {id}] add_down_track add stream {stream_id} with 0 tracks");
         tracks.insert(stream_id, Vec::new());
     }
 
@@ -201,28 +235,66 @@ impl Subscriber {
         Ok(())
     }
 
+    /// Calls `on_negotiate` with the given ice_restart value
+    /// # Returns
+    /// Negotiation result
     pub async fn renegotiate(&self, ice_restart: bool) -> Result<()> {
-        let mut handler = self.on_renegotiate.lock().await;
-        if let Some(f) = &mut *handler {
-            f(ice_restart).await?;
+        let options = Some(RTCOfferOptions { voice_activity_detection: true, ice_restart });
+        self.negotiate(options).await
+    }
+
+    pub async fn restart_peer_connection(&mut self, offer_options: Option<RTCOfferOptions>) -> Result<()> {
+        let pc = self.pc.clone();
+        match pc.close().await {
+            Ok(_) => {
+                info!("[Subscriber {}] Peer connection closed", self.id);
+            },
+            Err(err) => {
+                warn!("[Subscriber {}] Peer connection close failed: {err}", self.id);
+            }
         }
+        self.pc = api::create_subscriber_connection(&self.config).await?;
+        self.negotiate(offer_options).await?;
         Ok(())
     }
 
-    async fn on_ice_connection_state_change(&self) {
+    pub fn on_answer(self: &Arc<Self>) -> Result<()> {
+        let sub = self.clone();
+        self.pc.on_negotiation_needed(Box::new(move || {
+            let sub_in = sub.clone();
+            Box::pin(async move {
+                info!("Start renegotiation");
+                if let Err(err) = sub_in.renegotiate(true).await {
+                    error!("renegotiate err: {}", err);
+                }
+            })
+        }));
+        self.on_ice_connection_state_change();
+        Ok(())
+    }
+
+    fn on_ice_connection_state_change(&self) {
         let pc_out = Arc::clone(&self.pc);
+        let id_out = self.id.clone();
 
         self.pc.on_ice_connection_state_change(Box::new(
             move |ice_state: RTCIceConnectionState| {
                 let pc_in = Arc::clone(&pc_out);
+                let id = id_out.clone();
                 Box::pin(async move {
                     match ice_state {
-                        RTCIceConnectionState::Failed | RTCIceConnectionState::Closed => {
-                            if let Err(e) = pc_in.close().await {
-                                error!("on_ice_connection_state_change err: {}", e);
+                        RTCIceConnectionState::Failed => {
+                            info!("[Subscriber {id}] Restarting ICE");
+                            if let Err(err) = pc_in.restart_ice().await {
+                               error!("[Subscriber {id}] restart_ice err: {}", err);
                             }
+                        },
+                        RTCIceConnectionState::Closed => {
+                            info!("[Subscriber {id}] ICE connection closed");
+                        },
+                        _ => {
+                            debug!("[Subscriber {id}] ICE connection state changed to {:?}", ice_state);
                         }
-                        _ => {}
                     }
                 })
             },
@@ -236,8 +308,24 @@ impl Subscriber {
     }
 
     pub async fn send_message(&self, content: &str) {
+        let open = self.api_channel_open.load(Ordering::Acquire);
+        if !open {
+            return;
+        }
+
         if let Err(e) = self.api_channel.send_text(content).await {
-            error!("Send message error: {e}");
+            match e {
+                webrtc::Error::ErrDataChannelNotOpen | webrtc::Error::ErrClosedPipe => {
+                    let pending = self.negotiation_pending.load(Ordering::Relaxed);
+                    if !pending {
+                        match self.renegotiate(true).await {
+                            Ok(_) => self.negotiation_pending.store(true, Ordering::Relaxed),
+                            Err(err) => error!("[Subscriber {}] [send_message] negotiate error: {err}", self.id),
+                        }
+                    } 
+                },
+                _ => error!("[Subscriber {}] Send message error: {e}", self.id),
+            }
         }
     }
 
@@ -280,6 +368,7 @@ impl Subscriber {
 
     pub async fn set_remote_description(&self, sdp: RTCSessionDescription) -> Result<()> {
         self.pc.set_remote_description(sdp).await?;
+        self.negotiation_pending.store(false, Ordering::Relaxed);
 
         let mut candidates = self.candidates.lock().await;
         

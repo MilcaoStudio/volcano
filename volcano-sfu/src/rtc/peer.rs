@@ -1,21 +1,23 @@
 use anyhow::Result;
-use subscriber::Subscriber;
 use std::{
     fmt::Debug,
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
+use subscriber::Subscriber;
 use tokio::sync::Mutex;
 use webrtc::{
     ice_transport::{
-        ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}, ice_connection_state::RTCIceConnectionState
+        ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
+        ice_connection_state::RTCIceConnectionState,
     },
     peer_connection::{
-        configuration::RTCConfiguration, offer_answer_options::RTCOfferOptions, sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState
+        configuration::RTCConfiguration, offer_answer_options::RTCOfferOptions,
+        sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState,
     },
 };
 
@@ -96,22 +98,23 @@ impl Peer {
             negotiation_pending: Arc::default(),
             remote_answer_pending: Arc::default(),
         };
-        
+
         Ok(peer)
     }
 
     pub async fn answer(&self, sdp: RTCSessionDescription) -> Result<RTCSessionDescription> {
-        match &*self.publisher.lock().await { Some(publisher) => {
-            info!("[Peer {}] Get offer", self.id());
-            if publisher.signaling_state() != RTCSignalingState::Stable {
-                return Err(Error::ErrOfferIgnored.into());
+        match &*self.publisher.lock().await {
+            Some(publisher) => {
+                info!("[Peer {}] Get offer", self.id());
+                if publisher.signaling_state() != RTCSignalingState::Stable {
+                    return Err(Error::ErrOfferIgnored.into());
+                }
+
+                info!("[Publisher {}] Send answer", self.id());
+                publisher.answer(sdp).await
             }
-            
-            info!("[Publisher {}] Send answer", self.id());
-            publisher.answer(sdp).await
-        } _ => {
-            Err(Error::ErrNoTransportEstablished.into())
-        }}
+            _ => Err(Error::ErrNoTransportEstablished.into()),
+        }
     }
     /// Clean up any open connections
     pub async fn clean_up(&self) {
@@ -138,7 +141,7 @@ impl Peer {
     pub async fn join(self: &Arc<Self>, room: Arc<Room>, cfg: &JoinConfig) -> Result<()> {
         let id = &self.id;
         info!("[{id}] Join to {} requested", room.id);
-        
+
         *self.room.lock().await = Some(room.clone());
         let rtc_config_clone = RTCConfiguration {
             ice_servers: self.config.configuration.ice_servers.clone(),
@@ -153,82 +156,11 @@ impl Peer {
         };
 
         if !cfg.no_subscribe {
-            let mut inner_subscriber =
-                Subscriber::new(self.user_id.clone(), &self.config).await?;
+            let mut inner_subscriber = Subscriber::new(self.user_id.clone(), self.config.clone()).await?;
             inner_subscriber.no_auto_subscribe = cfg.no_auto_subscribe;
             let subscriber = Arc::new(inner_subscriber);
-            let remote_answer_pending_out = self.remote_answer_pending.clone();
-            //let remote_answer_pending_out_2 = self.remote_answer_pending.clone();
-            let negotiation_pending_out = self.negotiation_pending.clone();
-            //let negotiation_pending_out_2 = self.negotiation_pending.clone();
-            let closed_out = self.closed.clone();
-            //let closed_out_2 = self.closed.clone();
-            let sub = Arc::clone(&subscriber);
-            let sub_2 = Arc::clone(&subscriber);
-            let on_offer_handler_out = self.on_offer_fn.clone();
-            //let on_offer_handler_out_2 = self.on_offer_fn.clone();
-            let id_clone_out = id.clone();
-            //let id_clone_out_2 = id.clone();
-            subscriber
-                .register_on_negotiate(Box::new(move |offer_options: Option<RTCOfferOptions>| {
-                    let remote_answer_pending_in = remote_answer_pending_out.clone();
-                    let negotiation_pending_in = negotiation_pending_out.clone();
-                    let closed_in = closed_out.clone();
-                    let id_clone_in = id_clone_out.clone();
-                    let sub_in = sub.clone();
-                    let on_offer_handler_in = on_offer_handler_out.clone();
-                    Box::pin(async move {
-                        debug!("Start negotiation");
-                        if remote_answer_pending_in.load(Ordering::Relaxed) {
-                            (*negotiation_pending_in).store(true, Ordering::Relaxed);
-                            debug!("Negotiation set to pending. Reason: Remote answer pending");
-                            return Ok(());
-                        }
+            self.setup_subscriber(subscriber.clone()).await;
 
-                        let offer = sub_in.create_offer(offer_options).await?;
-                        (*remote_answer_pending_in).store(true, Ordering::Relaxed);
-
-                        if let Some(on_offer) = &mut *on_offer_handler_in.lock().await {
-                            if !closed_in.load(Ordering::Relaxed) {
-                                info!("[Peer {}] Send offer", id_clone_in);
-                                on_offer(offer).await;
-                            }
-                        }
-
-                        Ok(())
-                    })
-                }))
-                .await;
-            subscriber.pc.on_negotiation_needed(Box::new(move || {
-                let sub_in = sub_2.clone();
-                let offer = RTCOfferOptions { voice_activity_detection: true, ice_restart: true };
-                Box::pin(async move {
-                    if let Err(err) = sub_in.negotiate(Some(offer)).await {
-                        error!("negotiate err: {}", err);
-                    }
-                })
-            }));
-            let on_ice_candidate_out = self.on_ice_candidate_fn.clone();
-            let closed_out_ = self.closed.clone();
-            subscriber.register_on_ice_candidate(Box::new(move |candidate| {
-                let on_ice_candidate_in = on_ice_candidate_out.clone();
-                let closed_in = closed_out_.clone();
-                Box::pin(async move {
-                    if candidate.is_none() {
-                        return;
-                    }
-                    if let Some(on_ice_candidate) = &mut *on_ice_candidate_in.lock().await {
-                        if !closed_in.load(Ordering::Relaxed) {
-                            if let Ok(val) = candidate.unwrap().to_json() {
-                                on_ice_candidate(val, SUBSCRIBER).await;
-                            }
-                        }
-                    }
-                })
-            }));
-            //let room_out_1 = room.clone();
-            //let user_id_out = self.user_id.clone();
-            
             *self.subscriber.lock().await = Some(subscriber);
         }
 
@@ -288,11 +220,8 @@ impl Peer {
         }
 
         room.add_peer(self.clone()).await;
-        info!(
-            "[Peer {}] Adds to room {}",
-            id, room.id
-        );
-        
+        info!("[Peer {}] Adds to room {}", id, room.id);
+
         // Send user join event with no tracks
         room.join_user(id.to_owned(), Vec::new()).await;
 
@@ -310,6 +239,64 @@ impl Peer {
         let mut handler = self.on_ice_connection_state_change.lock().await;
         *handler = Some(f);
     }
+
+    async fn setup_subscriber(&self, subscriber: Arc<Subscriber>) {
+        let remote_answer_pending_out = self.remote_answer_pending.clone();
+        let negotiation_pending_out = self.negotiation_pending.clone();
+        let closed_out = self.closed.clone();
+        let sub = Arc::clone(&subscriber);
+        let on_offer_handler_out = self.on_offer_fn.clone();
+        let id_clone_out = self.id.clone();
+        subscriber
+            .register_on_negotiate(Box::new(move |offer_options: Option<RTCOfferOptions>| {
+                let remote_answer_pending_in = remote_answer_pending_out.clone();
+                let negotiation_pending_in = negotiation_pending_out.clone();
+                let closed_in = closed_out.clone();
+                let id_clone_in = id_clone_out.clone();
+                let sub_in = sub.clone();
+                let on_offer_handler_in = on_offer_handler_out.clone();
+                Box::pin(async move {
+                    debug!("Start negotiation");
+                    if remote_answer_pending_in.load(Ordering::Relaxed) {
+                        (*negotiation_pending_in).store(true, Ordering::Relaxed);
+                        debug!("Negotiation set to pending. Reason: Remote answer pending");
+                        return Ok(());
+                    }
+
+                    let offer = sub_in.create_offer(offer_options).await?;
+                    (*remote_answer_pending_in).store(true, Ordering::Relaxed);
+
+                    if let Some(on_offer) = &mut *on_offer_handler_in.lock().await {
+                        if !closed_in.load(Ordering::Relaxed) {
+                            info!("[Peer {}] Send offer", id_clone_in);
+                            on_offer(offer).await;
+                        }
+                    }
+
+                    Ok(())
+                })
+            }))
+            .await;
+        let on_ice_candidate_out = self.on_ice_candidate_fn.clone();
+        let closed_out_ = self.closed.clone();
+        subscriber.register_on_ice_candidate(Box::new(move |candidate| {
+            let on_ice_candidate_in = on_ice_candidate_out.clone();
+            let closed_in = closed_out_.clone();
+            Box::pin(async move {
+                if candidate.is_none() {
+                    return;
+                }
+                if let Some(on_ice_candidate) = &mut *on_ice_candidate_in.lock().await {
+                    if !closed_in.load(Ordering::Relaxed) {
+                        if let Ok(val) = candidate.unwrap().to_json() {
+                            on_ice_candidate(val, SUBSCRIBER).await;
+                        }
+                    }
+                }
+            })
+        }));
+    }
+    
     pub async fn on_ice_candidate(&self, f: OnIceCandidateFn) {
         let mut handler = self.on_ice_candidate_fn.lock().await;
         *handler = Some(f);
@@ -321,32 +308,22 @@ impl Peer {
     }
 
     pub async fn set_remote_description(&self, sdp: RTCSessionDescription) -> Result<()> {
-        match &*self.subscriber.lock().await { Some(subscriber) => {
-            info!("[Peer {}] sets remote description", self.id);
-            subscriber.set_remote_description(sdp).await?;
-            self.remote_answer_pending.store(false, Ordering::Relaxed);
+        match &*self.subscriber.lock().await {
+            Some(subscriber) => {
+                info!("[Peer {}] sets remote description", self.id);
+                subscriber.set_remote_description(sdp).await?;
+                self.remote_answer_pending.store(false, Ordering::Relaxed);
 
-            if self.negotiation_pending.load(Ordering::Relaxed) {
-                self.negotiation_pending.store(false, Ordering::Relaxed);
-                info!("Subscriber negotiate");
-                subscriber.negotiate(None).await?;
-            }
-
-            // set renegotation method for subscriber
-            let sub = subscriber.clone();
-            subscriber.pc.on_negotiation_needed(Box::new(move || {
-                let sub_in = sub.clone();
-                Box::pin(async move {
-                info!("Start renegotiation");
-                if let Err(err) = sub_in.negotiate(Some( RTCOfferOptions { voice_activity_detection: true, ice_restart: true })).await {
-                    error!("renegotiate err: {}", err);
+                if self.negotiation_pending.load(Ordering::Relaxed) {
+                    self.negotiation_pending.store(false, Ordering::Relaxed);
+                    info!("Subscriber negotiate");
+                    subscriber.negotiate(None).await?;
                 }
-            })}));
-        } _ => {
-            return Err(Error::ErrNoTransportEstablished.into());
-        }}
 
-        Ok(())
+                subscriber.on_answer().map_err(Into::into)
+            }
+            _ => Err(Error::ErrNoTransportEstablished.into()),
+        }
     }
 
     pub async fn subscriber(&self) -> Option<Arc<Subscriber>> {
