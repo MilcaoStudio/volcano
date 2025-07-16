@@ -5,40 +5,39 @@ pub use factory::*;
 pub mod nack;
 pub mod rtcp_reader;
 
-use error::Result;
 pub use error::BufferError;
+use error::Result;
 
 use bucket::Bucket;
 use nack::NackQueue;
+use webrtc::rtp::extension::transport_cc_extension::TransportCcExtension;
 
-
+use async_trait::async_trait;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::time::Instant;
 use std::{pin::Pin, sync::Arc};
-use std::future::Future;
-use async_trait::async_trait;
-use bytes::Buf;
-use webrtc::sdp::extmap;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use webrtc::rtp::extension::audio_level_extension::AudioLevelExtension;
 use webrtc::rtp::packet::Packet;
+use webrtc::sdp::extmap;
 use webrtc::util::Unmarshal;
 
-use webrtc::rtp_transceiver as rtp;
 use rtp::rtp_codec::{RTCRtpParameters, RTPCodecType};
 use webrtc::rtcp::packet::Packet as RtcpPacket;
+use webrtc::rtp_transceiver as rtp;
 
-
+const INITIAL_PACKET_PROBE_COUNT: u8 = 25;
 const MAX_SEQUENCE_NUMBER: u32 = 1 << 16;
 const REPORT_DELTA: f64 = 1e9;
 
 pub type OnCloseFn =
     Box<dyn (FnMut() -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>) + Send + Sync>;
 pub type OnTransportWideCCFn = Box<
-    dyn (FnMut(u16, i64, bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync,
+    dyn (FnMut(u16, u32, bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync,
 >;
 pub type OnFeedbackCallBackFn = Box<
     dyn (FnMut(
@@ -81,14 +80,15 @@ pub struct VP8 {
 
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 struct PendingPackets {
-    arrival_time: u64,
+    arrival_time: u32,
     pub packet: Packet,
 }
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub struct ExtPacket {
     pub head: bool,
     cycle: u32,
-    pub arrival: i64,
+    /// The arrival time of the packet (in nanoseconds).
+    pub arrival: u32,
     pub packet: Packet,
     pub key_frame: bool,
     pub payload: VP8,
@@ -120,7 +120,8 @@ pub struct Buffer {
     media_ssrc: u32,
     clock_rate: u32,
     max_bitrate: u64,
-    last_report: i64,
+    /// Time when the last packet was reported (in nanoseconds).
+    last_report: u32,
     twcc_ext: u8,
     audio_ext: u8,
     bound: bool,
@@ -133,7 +134,7 @@ pub struct Buffer {
     twcc: bool,
     audio_level: bool,
 
-    min_packet_probe: i32,
+    min_packet_probe: u8,
     last_packet_read: i32,
 
     pub max_temporal_layer: i32,
@@ -142,18 +143,24 @@ pub struct Buffer {
     last_srntp_time: u64,
     last_srrtp_time: u32,
     last_sr_recv: i64, // Represents wall clock of the most recent sender report arrival
+    /// The lowest sequence number received in packet probe.
     base_sn: u16,
     cycles: u32,
     #[allow(dead_code)]
     last_rtcp_packet_time: i64, // Time the last RTCP packet was received.
     #[allow(dead_code)]
     last_rtcp_sr_time: i64, // Time the last RTCP SR was received. Required for DLSR computation.
-    last_transit: u32,
-    max_seq_no: u16, // The highest sequence number received in an RTP data packet
+    /// The latest transit time.
+    last_transit: f64,
+    /// The highest sequence number received.
+    max_seq_no: u16,
 
     stats: Stats,
-    latest_timestamp: u32,      // latest received RTP timestamp on packet
-    latest_timestamp_time: i64, // Time of the latest timestamp (in nanos since unix epoch)
+    /// The latest timestamp received on a packet.
+    /// The timestamp reflects the sampling instant of the first octet in the RTP data packet.
+    latest_timestamp: u32,
+    /// Subsecond timestamp when the latest timestamp was received.
+    latest_timestamp_nanos: u32,
 
     video_pool_len: usize,
     audio_pool_len: usize,
@@ -173,6 +180,15 @@ impl Buffer {
             ..Default::default()
         }
     }
+
+    /// Calculates and updates jitter for the given transit time.
+    fn calculate_jitter(&mut self, transit: f64) {
+        if self.last_transit != 0.0 {
+            let d = (transit - self.last_transit).abs();
+            self.stats.jitter += (d - self.stats.jitter) / 16.0;
+        }
+        self.last_transit = transit;
+    }
 }
 
 pub struct AtomicBuffer {
@@ -181,14 +197,14 @@ pub struct AtomicBuffer {
 
 #[async_trait]
 impl BufferIO for AtomicBuffer {
-     /// Adds a RTP Packet, out of order, new packet may be arrived later
-     async fn write(&self, pkt: Packet) {
+    /// Adds a RTP Packet, out of order, new packet may be arrived later
+    async fn write(&self, pkt: Packet) {
         {
             let mut buffer = self.buffer.lock().await;
 
             if !buffer.bound {
                 buffer.pending_packets.push(PendingPackets {
-                    arrival_time: Instant::now().elapsed().subsec_nanos() as u64,
+                    arrival_time: Instant::now().elapsed().subsec_nanos(),
                     packet: pkt.clone(),
                 });
 
@@ -196,7 +212,7 @@ impl BufferIO for AtomicBuffer {
             }
         }
 
-        self.calc(pkt, Instant::now().elapsed().subsec_nanos() as i64)
+        self.calc(pkt, Instant::now().elapsed().subsec_nanos())
             .await;
     }
 
@@ -218,7 +234,6 @@ impl BufferIO for AtomicBuffer {
                 return Err(BufferError::ErrBufferTooSmall);
             }*/
 
-            
             let packet = &buffer
                 .pending_packets
                 .get(buffer.last_packet_read as usize)
@@ -241,7 +256,6 @@ impl BufferIO for AtomicBuffer {
         Ok(())
     }
 }
-
 
 impl AtomicBuffer {
     pub fn new(ssrc: u32) -> Self {
@@ -305,20 +319,24 @@ impl AtomicBuffer {
             _ => {}
         }
 
-        debug!("bind -> Processing {} packets", buffer.pending_packets.len());
+        debug!(
+            "bind -> Processing {} packets",
+            buffer.pending_packets.len()
+        );
         for pp in buffer.pending_packets.clone() {
-            self.calc(pp.packet, pp.arrival_time as i64).await;
+            self.calc(pp.packet, pp.arrival_time).await;
         }
         debug!("bind -> Binding done");
 
         buffer.pending_packets.clear();
         buffer.bound = true;
     }
-    
+
     pub async fn bitrate(&self) -> u64 {
         self.buffer.lock().await.bitrate
     }
 
+    /// Returns an empty vector when there is no nacker available.
     async fn build_nack_packet(
         &self,
         buffer: &mut Buffer,
@@ -358,8 +376,10 @@ impl AtomicBuffer {
         pkts
     }
 
-    pub async fn calc(&self, packet: Packet, arrival_time: i64) {
-        let buffer = &mut self.buffer.lock().await;
+    /// Updates the buffer with the given packet and its arrival time.
+    /// The packet is added to the bucket. An [ExtPacket] is created and inserted into the packet queue.
+    pub async fn calc(&self, packet: Packet, arrival_time: u32) {
+        let mut buffer = self.buffer.lock().await;
         let sn = packet.header.sequence_number;
         let distance = bucket::distance(sn, buffer.max_seq_no);
 
@@ -406,10 +426,9 @@ impl AtomicBuffer {
 
         let pkt = &packet.payload;
         let max_seq_no = buffer.max_seq_no;
-        if let Some(bucket) = &mut buffer.bucket {
-            let rv = bucket.add_packet(pkt, sn, sn == max_seq_no);
-            if let Err(err) = rv {
-                error!("{err}");
+        if let Some(bucket) = buffer.bucket.as_mut() {
+            if let Err(err) = bucket.add_packet(pkt, sn, sn == max_seq_no) {
+                warn!("Packet #{sn} content not added: {err}");
             }
         }
 
@@ -430,8 +449,10 @@ impl AtomicBuffer {
             "video/vp8" => {
                 let mut vp8_packet = VP8::default();
                 if let Err(e) = vp8_packet.unmarshal(&packet.payload[..]) {
-                    error!("calc error: {}", e);
-                    return;
+                    match e {
+                        BufferError::ErrNilPacket => {},
+                        _ => warn!("Error parsing VP8 packet: {e}"),
+                    }
                 }
                 ep.key_frame = vp8_packet.is_key_frame;
                 ep.payload = vp8_packet;
@@ -439,10 +460,14 @@ impl AtomicBuffer {
             "video/h264" => {
                 ep.key_frame = is_h264_keyframe(&packet.payload[..]);
             }
-            _ => {}
+            mime => {
+                if mime.starts_with("video/") {
+                    debug!("Unsupported MIME type: {mime}. Ignored.");
+                }
+            }
         }
 
-        if buffer.min_packet_probe < 25 {
+        if buffer.min_packet_probe < INITIAL_PACKET_PROBE_COUNT {
             if sn < buffer.base_sn {
                 buffer.base_sn = sn
             }
@@ -462,34 +487,29 @@ impl AtomicBuffer {
 
         // if first time update or the timestamp is later (factoring timestamp wrap around)
         let latest_timestamp = buffer.latest_timestamp;
-        let latest_timestamp_in_nanos_since_epoch = buffer.latest_timestamp_time;
-        if (latest_timestamp_in_nanos_since_epoch == 0)
-            || is_later_timestamp(packet.header.timestamp, latest_timestamp)
-        {
+        let subsec_nanos = buffer.latest_timestamp_nanos;
+        if (subsec_nanos == 0) || is_later_timestamp(packet.header.timestamp, latest_timestamp) {
             buffer.latest_timestamp = packet.header.timestamp;
-            buffer.latest_timestamp_time = arrival_time;
+            buffer.latest_timestamp_nanos = arrival_time;
         }
 
         let arrival = arrival_time as f64 / 1e6 * (buffer.clock_rate as f64 / 1e3);
         let transit = arrival - packet.header.timestamp as f64;
-        if buffer.last_transit != 0 {
-            let mut d = transit - buffer.last_transit as f64;
-            if d < 0.0 {
-                d *= -1.0;
-            }
-
-            buffer.stats.jitter += (d - buffer.stats.jitter) / 16_f64;
-        }
-        buffer.last_transit = transit as u32;
+        buffer.calculate_jitter(transit);
 
         if buffer.twcc {
-            if let Some(mut ext) = packet.header.get_extension(buffer.twcc_ext) {
-                if ext.len() > 1 {
-                    let mut handler = buffer.on_transport_wide_cc_handler.lock().await;
-                    if let Some(f) = &mut *handler {
-                        f(ext.get_u16(), arrival_time, packet.header.marker).await;
+            if let Some(ext) = packet.header.get_extension(buffer.twcc_ext) {
+                match TransportCcExtension::unmarshal(&mut &ext[..]) {
+                    Ok(data) => {
+                        let mut handler = buffer.on_transport_wide_cc_handler.lock().await;
+                        if let Some(f) = &mut *handler {
+                            f(data.transport_sequence, arrival_time, packet.header.marker).await;
+                        }
                     }
-                }
+                    Err(err) => {
+                        error!("Error parsing transport wide cc extension: {err}");
+                    }
+                };
             }
         }
 
@@ -506,19 +526,23 @@ impl AtomicBuffer {
             }
         }
 
-        let diff = arrival_time - buffer.last_report;
+        let diff = arrival_time.saturating_sub(buffer.last_report);
 
         if buffer.nacker.is_some() {
-            let rv = self.build_nack_packet(buffer).await;
+            let rv = self.build_nack_packet(&mut buffer).await;
             let mut handler = buffer.on_feedback_callback_handler.lock().await;
             if let Some(f) = &mut *handler {
                 f(rv).await;
             }
         }
 
-        if diff as f64 >= REPORT_DELTA {
-            let br = 8 * buffer.bitrate_helper * REPORT_DELTA as u64 / diff as u64;
-            buffer.bitrate = br;
+        if diff >= REPORT_DELTA as u32 {
+            if diff > 0 {
+                let br = 8 * buffer.bitrate_helper * REPORT_DELTA as u64 / diff as u64;
+                buffer.bitrate = br;
+            } else {
+                warn!("Attemped to divide by zero. Skipped bitrate.");
+            }
             buffer.last_report = arrival_time;
             buffer.bitrate_helper = 0;
         }

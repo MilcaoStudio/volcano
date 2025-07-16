@@ -17,7 +17,7 @@ use webrtc::track::track_remote::TrackRemote;
 use super::downtrack::{DownTrack, DownTrackInternal};
 use super::error::Result;
 use super::receiver::{Receiver, RtcpDataReceiver, RtcpDataSender, WebRTCReceiver};
-use crate::buffer::Options as BufferOptions;
+use crate::buffer::{BufferError, Options as BufferOptions};
 use crate::rtc::peer::subscriber::Subscriber;
 use crate::rtc::room::{Room, RoomEvent};
 use crate::track::audio_observer::AudioObserver;
@@ -480,7 +480,15 @@ impl LocalRouter {
             while let Ok((pkt, _)) = track.read(&mut b).await {
                 let tmp_b = b.clone();
                 if let Err(err) = rtcp_reader.write(tmp_b).await {
-                    error!("rtcp_reader write error: {}", err);
+                    match err {
+                        BufferError::ErrRTCP(rtcp_err) => {
+                            match rtcp_err {
+                                webrtc::rtcp::Error::PacketTooShort => {}, // ignore short packets
+                                _ => error!("handle error: {}", rtcp_err),
+                            }
+                        }
+                        _ => error!("rtcp_reader write error: {}", err),
+                    }
                 };
                 buffer_clone.write(pkt).await;
             }
@@ -509,7 +517,6 @@ impl LocalRouter {
                         };
 
                         if is_empty {
-                            info!("Continue");
                             continue;
                         }
 

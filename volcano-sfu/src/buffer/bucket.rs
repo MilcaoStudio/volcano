@@ -82,24 +82,24 @@ impl Bucket {
         self.push(pkt)
     }
 
+    /// Copies the packet data into the provided buffer, if the packet is found.
+    /// 
+    /// # Returns
+    /// - `Ok(usize)`: The number of bytes copied into the buffer.
+    /// - `Err(BufferError::ErrPacketNotFound)`: The packet is not found.
+    /// - `Err(BufferError::ErrBufferTooSmall)`: The provided buffer is too small to hold the packet data.
     pub fn get_packet(&self, buf: &mut [u8], sn: u16) -> Result<usize> {
-        let p = self.get(sn);
-
-        if p.is_none() {
-            return Err(BufferError::ErrPacketNotFound);
+        match self.get(sn) {
+            Some(packet_data) => {
+                let size = packet_data.len();
+                if buf.len() < size {
+                    return Err(BufferError::ErrBufferTooSmall);
+                }
+                buf.copy_from_slice(&packet_data[..]);
+                Ok(size)
+            },
+            None => Err(BufferError::ErrPacketNotFound),
         }
-
-        let i = p.clone().unwrap().len();
-
-        if buf.len() < i {
-            return Err(BufferError::ErrBufferTooSmall);
-        }
-
-        if let Some(data) = p {
-            buf.copy_from_slice(&data[..]);
-        }
-
-        Ok(i)
     }
 
     fn push(&mut self, pkt: &[u8]) -> Result<Vec<u8>> {

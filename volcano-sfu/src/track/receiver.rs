@@ -493,13 +493,10 @@ impl Receiver for WebRTCReceiver {
     ) -> Result<()> {
         for packet in packets {
             if let Some(buffer) = &self.buffers.lock().await[packet.layer as usize] {
-                let mut data = vec![0_u8; 65535];
+                let mut data = vec![0_u8; u16::MAX.into()];
 
                 if let Ok(size) = buffer.get_packet(&mut data[..], packet.source_seq_no).await {
-                    let mut raw_data = Vec::new();
-                    raw_data.extend_from_slice(&data[..size]);
-
-                    let mut raw_pkt = Bytes::from(raw_data);
+                    let mut raw_pkt = Bytes::copy_from_slice(&data[..size]);
                     let pkt = RTCPacket::unmarshal(&mut raw_pkt);
                     match pkt {
                         Ok(mut p) => {
@@ -534,12 +531,14 @@ impl Receiver for WebRTCReceiver {
                                 track.update_stats(size as u32);
                             }
                         }
-                        Err(_) => {
+                        Err(err) => {
+                            warn!("Invalid RTC packet: {err}. Skipped.");
                             continue;
                         }
                     }
                 }
             } else {
+                warn!("No buffer found for layer {}. Retransmition skipped.", packet.layer);
                 break;
             }
         }

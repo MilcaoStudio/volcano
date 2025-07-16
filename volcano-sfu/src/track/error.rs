@@ -20,9 +20,9 @@ pub enum Error {
     // ErrTurnNoneAuthKey
     #[error("cannot get auth key from user map")]
     ErrTurnNoneAuthKey,
-    #[error("webrtc error")]
+    #[error("webrtc error {0}")]
     ErrWebRTC(RTCError),
-    #[error("rtcp error")]
+    #[error("rtcp error {0}")]
     ErrRTCP(RTCPError),
     #[error("no subscriber for this peer")]
     ErrNoSubscriber,
