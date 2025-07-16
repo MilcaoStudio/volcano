@@ -1,20 +1,27 @@
-use std::{collections::BTreeMap, fmt::Debug, sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-}};
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use dashmap::{DashMap, DashSet};
 use postage::{
-    broadcast::{channel, Receiver, Sender},
+    broadcast::{Receiver, Sender, channel},
     sink::Sink,
 };
 use tokio::sync::Mutex;
 use ulid::Ulid;
 use webrtc::{
-    data::data_channel::DataChannel, data_channel::{
-        data_channel_message::DataChannelMessage, data_channel_state::RTCDataChannelState,
-        RTCDataChannel,
-    }, peer_connection::offer_answer_options::RTCOfferOptions, track::track_local::{track_local_static_rtp::TrackLocalStaticRTP, TrackLocal}
+    data::data_channel::DataChannel,
+    data_channel::{
+        RTCDataChannel, data_channel_message::DataChannelMessage,
+        data_channel_state::RTCDataChannelState,
+    },
+    peer_connection::offer_answer_options::RTCOfferOptions,
+    track::track_local::{TrackLocal, track_local_static_rtp::TrackLocalStaticRTP},
 };
 
 use serde::Serialize;
@@ -110,7 +117,10 @@ impl Room {
         let room_out_2 = Arc::clone(self);
         for lbl in self.labels.iter() {
             if lbl.eq(&label) {
-                info!("[Publisher {} -> Room {}] Data channel `{}` already exists, adding listener", owner, self.id, label);
+                info!(
+                    "[Publisher {} -> Room {}] Data channel `{}` already exists, adding listener",
+                    owner, self.id, label
+                );
                 // Adds message listener if user is already registered
                 dc.on_message(Box::new(move |msg: DataChannelMessage| {
                     let room_in = room_out.clone();
@@ -159,63 +169,63 @@ impl Room {
             let label_out = label_out_2.clone();
 
             // Creates data channel in subscriber peer
-            match subscriber.create_data_channel(label_out.clone()).await { Ok(channel) => {
-                channel.on_message(Box::new(move |msg| {
-                    let origin = sub_out.id.clone();
-                    let room_inner = room_in.clone();
-                    let label_in = label_out.clone();
-                    Box::pin(async move {
-                        info!("Subscriber data channel message intercepted");
-                        // Fanout message to room subscribers
-                        room_inner.fanout_message(origin, label_in, msg).await;
-                    })
-                }))
-            } _ => {
-                continue;
-            }}
+            match subscriber.create_data_channel(label_out.clone()).await {
+                Ok(channel) => {
+                    channel.on_message(Box::new(move |msg| {
+                        let origin = sub_out.id.clone();
+                        let room_inner = room_in.clone();
+                        let label_in = label_out.clone();
+                        Box::pin(async move {
+                            info!("Subscriber data channel message intercepted");
+                            // Fanout message to room subscribers
+                            room_inner.fanout_message(origin, label_in, msg).await;
+                        })
+                    }))
+                }
+                _ => {
+                    continue;
+                }
+            }
 
             info!("Data channel negotiation");
-            match subscriber.negotiate(Some(RTCOfferOptions {
-                ice_restart: true,
-                voice_activity_detection: true,
-            })).await { Err(err) => {
-                error!("negotiate error:{}", err);
-            } _ => {
-                info!("Data channel negotiation successful");
-            }}
+            match subscriber
+                .negotiate(Some(RTCOfferOptions {
+                    ice_restart: true,
+                    voice_activity_detection: true,
+                }))
+                .await
+            {
+                Err(err) => {
+                    error!("negotiate error:{}", err);
+                }
+                _ => {
+                    info!("Data channel negotiation successful");
+                }
+            }
         }
     }
 
     pub(crate) async fn add_api_channel(self: &Arc<Self>, id: &str) {
-        match self.get_peer(id).await { Some(peer) => {
-            let room_out = self.clone();
-            //let user_id_out = id.to_owned();
-            if peer.subscriber().await.is_none() {
-                error!("add_api_channel No subscriber available");
-                return;
+        let room_id = &self.id;
+        match self.get_peer(id).await {
+            Some(peer) => {
+                match peer.subscriber().await {
+                    Some(subscriber) => {
+                        // on_open channel listener moved to subscriber.rs
+
+                        if let Err(err) = subscriber.negotiate(None).await {
+                            error!("[Room {room_id}] add_api_channel negotiate error: {}", err);
+                        }
+                    }
+                    _ => {
+                        warn!("[Room {room_id}] add_api_channel No subscriber available");
+                    }
+                }
             }
-            let subscriber = peer.subscriber().await.unwrap();
-            //let user_tracks = self.user_tracks.get(id).map(|tracks| tracks.clone());
-            subscriber.api_channel().on_open(Box::new( move || {
-                let room_in = room_out.clone();
-                //let user_id_in = user_id_out.clone();
-                //let tracks_in = user_tracks.unwrap_or_default();
-                Box::pin(async move {
-                    //room_in.join_user(user_id_in, tracks_in).await;
-                    info!("[Room {}] API channel opened", room_in.id);
-                    warn!("DataChannelOpen event not implemented");
-                })
-            }));
-            let room_id = self.id.clone();
-            info!("[Room {room_id}] Data channel negotiation");
-            match subscriber.negotiate(None).await { Err(err) => {
-                error!("[Room {room_id}] negotiate error: {}", err);
-            } _ => {
-                info!("[Room {room_id}] Negotiation successful");
-            }}
-        } _ => {
-            error!("[Room {}] Unknown peer {id}", self.id);
-        }}
+            _ => {
+                error!("[Room {room_id}] Unknown peer {id}");
+            }
+        }
     }
 
     pub async fn add_peer(&self, peer: Arc<Peer>) {
@@ -232,8 +242,6 @@ impl Room {
         self.publish(RoomEvent::Close(self.id.clone())).await;
         self.signalers.lock().await.clear();
     }
-
-    
 
     pub(super) fn get_data_channel_middlewares(&self) -> Arc<Vec<Arc<DataChannel>>> {
         self.data_channels.clone()
@@ -346,12 +354,17 @@ impl Room {
         self.user_tracks.insert(id, tracks);
     }
 
-    pub fn get_room_info(&self,) -> RoomInfo {
+    pub fn get_room_info(&self) -> RoomInfo {
         let user_tracks = self.user_tracks.clone();
         let mut users = BTreeMap::new();
         // Serialize user tracks
-        user_tracks.into_iter().for_each(|(key, value)| {users.insert(key, value);});
-        RoomInfo { id: self.id.clone(), users }
+        user_tracks.into_iter().for_each(|(key, value)| {
+            users.insert(key, value);
+        });
+        RoomInfo {
+            id: self.id.clone(),
+            users,
+        }
     }
 
     pub async fn subscribe(self: &Arc<Self>, peer: Arc<Peer>) {
@@ -443,11 +456,7 @@ impl Room {
     }
 
     /// Add a local track
-    pub async fn add_track(
-        &self,
-        user_id: String,
-        local_track: Arc<TrackLocalStaticRTP>,
-    ) {
+    pub async fn add_track(&self, user_id: String, local_track: Arc<TrackLocalStaticRTP>) {
         let id = local_track.id().to_owned();
         info!("{user_id} started broadcasting track with ID {id} to all users");
 
@@ -463,7 +472,11 @@ impl Room {
     pub async fn remove_track(&self, id: String) {
         self.close_track(&id);
 
-        self.send_message(RoomEvent::RemoveTrack { removed_tracks: vec![id], room: self.id.clone() }).await;
+        self.send_message(RoomEvent::RemoveTrack {
+            removed_tracks: vec![id],
+            room: self.id.clone(),
+        })
+        .await;
     }
 
     pub async fn publish_track(
@@ -500,15 +513,21 @@ impl Room {
     }
 
     /// Send a serializable message to all peers' subscribers
-    pub async fn send_message<Message>(&self, msg: Message) where Message: Serialize + Debug {
+    pub async fn send_message<Message>(&self, msg: Message)
+    where
+        Message: Serialize + Debug,
+    {
         if let Ok(payload) = serde_json::to_string(&msg) {
             info!("[Room {}] Sending room event: {}", self.id, payload);
             for peer in self.peers.iter() {
-                match peer.subscriber().await { Some(subscriber) => {
-                    subscriber.send_message(&payload).await;
-                } _ => {
-                    warn!("[{}] No subscriber available", peer.id());
-                }}
+                match peer.subscriber().await {
+                    Some(subscriber) => {
+                        subscriber.send_message(&payload).await;
+                    }
+                    _ => {
+                        warn!("[{}] No subscriber available", peer.id());
+                    }
+                }
             }
         } else {
             error!("Error parsing {:?}", msg);
