@@ -76,7 +76,7 @@ impl Publisher {
         */
 
         let pc = api::create_publisher_connection(cfg).await?;
-        let mut publisher = Publisher {
+        let publisher = Publisher {
             id: id.clone(),
             pc,
             tracks: Arc::new(Mutex::new(Vec::new())),
@@ -156,7 +156,7 @@ impl Publisher {
         *handler = Some(f);
     }
 
-    async fn on_track(&mut self) {
+    async fn on_track(&self) {
         let router_out = Arc::clone(&self.router);
         let router_out_2 = Arc::clone(&self.router);
         let room_out = Arc::clone(&self.room);
