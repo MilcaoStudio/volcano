@@ -141,7 +141,6 @@ impl AtomicSequencer {
         if let Some(data) = sequencer.seq.get(&sequencer.step) {
             Some(data.clone())
         } else {
-            trace!("sequencer step: {}", sequencer.step);
             None
         }
     }

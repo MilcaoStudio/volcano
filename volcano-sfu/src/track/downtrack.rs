@@ -757,6 +757,7 @@ impl DownTrack {
 
         let write_stream_val = self.down_track_local.write_stream.lock().await;
         if let Some(write_stream) = &*write_stream_val {
+            trace!("Sending VP8 packet to write stream (simple), {:?}", &ext_packet.packet.header);
             write_stream.write_rtp(&ext_packet.packet).await?;
         }
 
@@ -873,6 +874,7 @@ impl DownTrack {
 
         let write_stream_val = self.down_track_local.write_stream.lock().await;
         if let Some(write_stream) = &*write_stream_val {
+            trace!("Sending packet to write stream (simulcast) [layer {layer}] {:?}", &cur_packet);
             write_stream.write_rtp(&cur_packet.packet).await?;
         }
 
