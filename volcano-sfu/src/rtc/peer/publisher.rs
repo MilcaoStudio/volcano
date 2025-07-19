@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::future::Future;
 use std::sync::Arc;
@@ -122,18 +121,17 @@ impl Publisher {
     }
     
     pub async fn close(&self) {
-        let observer = self.router.audio_observer.lock().await;
-
-        // Remove publisher streams from audio observer
-        let tracks = &*self.tracks.lock().await;
-        let stream_ids: BTreeSet<String> = tracks.iter().map(|t| t.track.stream_id()).collect();
-        for stream_id in &stream_ids {
-            observer.remove_stream(stream_id).await;
-        }
-
         self.router.stop().await;
-        if let Err(err) = self.pc.close().await {
-            error!("close err: {}", err);
+
+        // Remove ice connection state change handler
+        *self.ice_connection_state_change_handler.lock().await = None;
+        match self.pc.close().await {
+            Ok(_) => {
+                info!("[Publisher {}] Peer connection closed", self.id);
+            },
+            Err(err) => {
+                warn!("[Publisher {}] Peer connection close failed: {err}", self.id);
+            }
         }
     }
 

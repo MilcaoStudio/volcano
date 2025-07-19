@@ -119,14 +119,18 @@ impl Peer {
     /// Clean up any open connections
     pub async fn clean_up(&self) {
         // Takes out mutex peers
-        let subscriber = self.subscriber.lock().await.take();
-        let publisher = self.publisher.lock().await.take();
-        if let Some(s) = subscriber {
-            s.close().await;
+        {
+            let subscriber = self.subscriber.lock().await.take();
+            if let Some(s) = subscriber {
+                s.close().await;
+            }
         }
 
-        if let Some(p) = publisher {
-            p.close().await;
+        {
+            let publisher = self.publisher.lock().await.take();
+            if let Some(p) = publisher {
+                p.close().await;
+            }
         }
     }
 
