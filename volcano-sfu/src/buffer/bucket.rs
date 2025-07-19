@@ -14,7 +14,7 @@ const MAX_PACKET_SIZE: usize = 1500;
 ///
 /// This function computes how many steps ahead `new` is from `old` in the circular sequence.
 pub fn distance(new: u16, old: u16) -> u16 {
-    ((new as i16) - (old as i16)) as u16
+    new.wrapping_sub(old)
 }
 
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
