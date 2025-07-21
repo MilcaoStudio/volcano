@@ -277,6 +277,24 @@ impl Client {
             }
         };
 
+        // Set up subscriber... on join?
+        if !cfg.no_subscribe {
+            info!("[Client {}] Set up subscriber", id);
+            peer.setup_subscriber(&cfg).await?;
+
+            if !cfg.no_publish {
+                if let Some(sub) = peer.subscriber().await {
+                    for dc in room.get_data_channel_middlewares().iter() {
+                        sub.add_data_channel(&dc.config.label).await?;
+                    }
+                }
+            }
+
+            info!("[Peer {}] Subscribe to room {}", peer.id(), room.id);
+            room.subscribe(peer.clone()).await;
+        }
+
+
         // Send room info
         let room_info = room.get_room_info();
         if let Err(err) = write.send(PacketS2C::RoomInfo { room: room_info }).await {

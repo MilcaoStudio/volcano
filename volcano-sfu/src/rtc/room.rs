@@ -243,7 +243,7 @@ impl Room {
         self.signalers.lock().await.clear();
     }
 
-    pub(super) fn get_data_channel_middlewares(&self) -> Arc<Vec<Arc<DataChannel>>> {
+    pub fn get_data_channel_middlewares(&self) -> Arc<Vec<Arc<DataChannel>>> {
         self.data_channels.clone()
     }
 
@@ -368,8 +368,6 @@ impl Room {
     }
 
     pub async fn subscribe(self: &Arc<Self>, peer: Arc<PubSubPeer>) {
-        info!("Subscribing a new peer");
-
         // Subscriber data channels to peer subscriber
         for label in self.labels.iter() {
             let room_out = self.clone();

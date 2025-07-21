@@ -18,18 +18,21 @@ use webrtc::{
     },
 };
 
+use super::{
+    OnICEConnectionStateChangeFn, OnOfferFn, OnPubSubICECandidateFn, PeerConfig, Publisher,
+    Subscriber,
+};
 use crate::rtc::{config::WebRTCTransportConfig, room::Room};
 use crate::track::error::Error;
-use super::{PeerConfig, Publisher, Subscriber, OnICEConnectionStateChangeFn, OnPubSubICECandidateFn, OnOfferFn};
 
 const PUBLISHER: u8 = 0;
 const SUBSCRIBER: u8 = 1;
 
 /// Two peer connections are used by this peer. Ideal for handling multiple requests.
-/// 
+///
 /// - [Publisher] peer listens for client's remote media tracks and publishes them into the publisher's router.
 /// - [Subscriber] peer subscribes to local tracks and sends them to client's peer connection.
-/// 
+///
 /// Suggestion: Despite of this peer implements [Default] trait, it is recommended to use [Self::new] to set an unique ID for this peer.
 #[derive(Clone, Default)]
 pub struct PubSubPeer {
@@ -116,25 +119,7 @@ impl PubSubPeer {
             version: self.config.version.clone(),
         };
 
-        if !cfg.no_subscribe {
-            let mut inner_subscriber = Subscriber::new(self.user_id.clone(), self.config.clone()).await?;
-            inner_subscriber.no_auto_subscribe = cfg.no_auto_subscribe;
-            let subscriber = Arc::new(inner_subscriber);
-            self.setup_subscriber(subscriber.clone()).await;
-
-            *self.subscriber.lock().await = Some(subscriber);
-        }
-
         if !cfg.no_publish {
-            if !cfg.no_subscribe {
-                if let Some(sub) = &*self.subscriber.lock().await {
-                    for dc in &*room.get_data_channel_middlewares() {
-                        sub.add_data_channel(&dc.config.label).await?;
-                    }
-                    info!("[Subscriber {}] Trying to offer...", sub.id);
-                    sub.create_offer(None).await?;
-                }
-            }
             let on_ice_candidate_out = self.on_ice_candidate_fn.clone();
             let closed_out_1 = self.closed.clone();
 
@@ -183,13 +168,6 @@ impl PubSubPeer {
         room.add_peer(self.clone()).await;
         info!("[Peer {}] Adds to room {}", id, room.id);
 
-        // Send user join event with no tracks
-        room.join_user(id.to_owned(), Vec::new()).await;
-
-        if !cfg.no_subscribe {
-            room.subscribe(self.clone()).await;
-        }
-
         Ok(())
     }
     pub async fn publisher(&self) -> Option<Arc<Publisher>> {
@@ -201,7 +179,12 @@ impl PubSubPeer {
         *handler = Some(f);
     }
 
-    async fn setup_subscriber(&self, subscriber: Arc<Subscriber>) {
+    pub async fn setup_subscriber(&self, cfg: &PeerConfig) -> Result<()> {
+        let mut inner_subscriber =
+            Subscriber::new(self.user_id.clone(), self.config.clone()).await?;
+        inner_subscriber.no_auto_subscribe = cfg.no_auto_subscribe;
+        let subscriber = Arc::new(inner_subscriber);
+
         let remote_answer_pending_out = self.remote_answer_pending.clone();
         let negotiation_pending_out = self.negotiation_pending.clone();
         let closed_out = self.closed.clone();
@@ -256,8 +239,11 @@ impl PubSubPeer {
                 }
             })
         }));
+
+        *self.subscriber.lock().await = Some(subscriber);
+        Ok(())
     }
-    
+
     pub async fn on_ice_candidate(&self, f: OnPubSubICECandidateFn) {
         let mut handler = self.on_ice_candidate_fn.lock().await;
         *handler = Some(f);
