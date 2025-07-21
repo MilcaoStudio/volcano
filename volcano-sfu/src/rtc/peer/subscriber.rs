@@ -11,8 +11,6 @@ use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
 use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtcp::source_description::SourceDescription;
-use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
-use webrtc::track::track_local::TrackLocal;
 use webrtc::{
     api::media_engine::MediaEngine, data_channel::RTCDataChannel,
     ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::RTCPeerConnection,
@@ -56,7 +54,7 @@ impl Subscriber {
     pub async fn new(id: String, config: Arc<WebRTCTransportConfig>) -> Result<Self> {
         let pc = api::create_subscriber_connection(&config.clone()).await?;
         let open = Arc::new(AtomicBool::default());
-        let api_channel = Self::create_api_data_channel(&pc, open.clone()).await?;
+        let api_channel = api::create_api_data_channel(&pc, id.clone(), open.clone()).await?;
 
         let subscriber = Subscriber {
             api_channel,
@@ -106,7 +104,7 @@ impl Subscriber {
                         if let Some(tracks) =
                             tracks_in.lock().await.get(&remote_media.stream_id)
                         {
-                            process_remote_media(&remote_media, tracks).await;
+                            api::process_remote_media(&remote_media, tracks).await;
                         }
                     }
                     Err(e) => error!("Error parsing message as RemoteMedia {e}")
@@ -118,33 +116,6 @@ impl Subscriber {
         self.channels.lock().await.insert(label.to_owned(), ndc);
 
         Ok(())
-    }
-
-    async fn create_api_data_channel(pc: &RTCPeerConnection, open: Arc<AtomicBool>) -> Result<Arc<RTCDataChannel>> {
-        let api = pc.create_data_channel(API_CHANNEL_LABEL, Some(RTCDataChannelInit::default())).await;
-        info!("[Subscriber] Created data channel `{API_CHANNEL_LABEL}` (awaiting for offer)");
-        match api {
-            Ok(channel) => {
-
-                let open_1 = open.clone();
-                channel.on_open(Box::new(move || {
-                    Box::pin(async move {
-                        open_1.store(true, Ordering::Release);
-                    })
-                }));
-
-                let open_2 = open.clone();
-                channel.on_close(Box::new(move || {
-                    let open_in = open_2.clone();
-                    Box::pin(async move {
-                        open_in.store(false, Ordering::Release);
-                    })
-                }));
-
-                Ok(channel)
-            },
-            Err(err) => Err(err.into()),
-        }
     }
 
     pub async fn close(&self) {
@@ -384,51 +355,4 @@ impl Subscriber {
     }
 }
 
-async fn process_remote_media(remote_media: &RemoteMedia, down_tracks: &Vec<Arc<DownTrack>>) {
-    if let Some(layers) = &remote_media.layers {
-        if !layers.is_empty() {
-            return;
-        }
-    }
-    for dt in down_tracks {
-        match dt.kind() {
-            RTPCodecType::Audio => dt.mute(!remote_media.audio),
-            RTPCodecType::Video => {
-                match remote_media.video.as_str() {
-                    HIGH_VALUE => {
-                        dt.mute(false);
-                        if let Err(err) = dt.switch_spatial_layer(2, true).await {
-                            error!("switch_spatial_layer err: {}", err);
-                        }
-                    }
-                    MEDIA_VALUE => {
-                        dt.mute(false);
-                        if let Err(err) = dt.switch_spatial_layer(1, true).await {
-                            error!("switch_spatial_layer err: {}", err);
-                        }
-                    }
-                    LOW_VALUE => {
-                        dt.mute(false);
-                        if let Err(err) = dt.switch_spatial_layer(0, true).await {
-                            error!("switch_spatial_layer err: {}", err);
-                        }
-                    }
-                    MUTED_VALUE => {
-                        dt.mute(true);
-                    }
-                    _ => {
-                        warn!("remote_media.video \"{}\" unrecognized", remote_media.video);
-                    }
-                }
 
-                match remote_media.frame_rate.as_str() {
-                    HIGH_VALUE => dt.switch_temporal_layer(3, true).await,
-                    MEDIA_VALUE => dt.switch_temporal_layer(2, true).await,
-                    LOW_VALUE => dt.switch_temporal_layer(1, true).await,
-                    _ => {}
-                }
-            }
-            RTPCodecType::Unspecified => {}
-        }
-    }
-}
