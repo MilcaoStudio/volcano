@@ -248,16 +248,18 @@ impl LocalRouter {
     /// - `receiver`: [Receiver] to copy the tracks from.
     /// 
     /// # Returns
-    /// - `Ok(())` if the operation was successful (or skipped).
+    /// - `Ok(bool)` if the operation was successful (or skipped). New negotiation is suggested when returns `true`.
     /// - `Err(Error)` if the operation failed (e.g. subscriber's negotiation failed).
     pub async fn add_down_tracks(
         &self,
         subscriber: Arc<Subscriber>,
         receiver: Option<Arc<dyn Receiver>>,
-    ) -> peer::error::Result<()> {
+    ) -> peer::error::Result<bool> {
+
+        let mut should_negotiate = false;
         if subscriber.no_auto_subscribe {
             info!("Router[{}] add_down_tracks Subscriber skips [no_auto_subscribe]", self.id);
-            return Ok(());
+            return Ok(should_negotiate);
         }
 
         if let Some(receiver) = receiver {
@@ -269,7 +271,7 @@ impl LocalRouter {
             if let Err(err) = self.add_down_track(subscriber.clone(), receiver).await {
                 error!("add_down_track err: {}", err);
             };
-            subscriber.negotiate(None).await?;
+            should_negotiate = true;
         }
 
         let recs = self.receivers.lock().await
@@ -283,10 +285,10 @@ impl LocalRouter {
                     error!("add_down_track err: {}", err);
                 };
             }
-            subscriber.negotiate(None).await?;
+            should_negotiate = true;
         }
 
-        Ok(())
+        Ok(should_negotiate)
     }
 
     /// Adds a new [Receiver] to this router if it doesn't exist, otherwise, returns the existing receiver.
