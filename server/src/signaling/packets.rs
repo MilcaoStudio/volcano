@@ -1,7 +1,7 @@
 use thiserror::Error;
 use tokio_tungstenite::tungstenite::Message;
 
-use volcano_sfu::rtc::{peer::JoinConfig, room::RoomInfo};
+use volcano_sfu::rtc::{peer::PeerConfig, room::RoomInfo};
 use webrtc::{
     ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
     peer_connection::sdp::session_description::RTCSessionDescription,
@@ -66,7 +66,7 @@ pub enum PacketC2S {
         room_id: String,
         offer: RTCSessionDescription,
         #[serde(default)]
-        cfg: JoinConfig,
+        cfg: PeerConfig,
     },
     /// Removes current user from current room
     Leave,

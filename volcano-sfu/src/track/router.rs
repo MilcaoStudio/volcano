@@ -18,7 +18,7 @@ use super::downtrack::{DownTrack, DownTrackInternal};
 use super::error::Result;
 use super::receiver::{Receiver, RtcpDataReceiver, RtcpDataSender, WebRTCReceiver};
 use crate::buffer::{BufferError, Options as BufferOptions};
-use crate::rtc::peer::subscriber::Subscriber;
+use crate::rtc::peer::{self, Subscriber};
 use crate::rtc::room::{Room, RoomEvent};
 use crate::track::audio_observer::AudioObserver;
 use crate::{buffer::BufferIO, buffer::AtomicFactory, rtc::config::RouterConfig};
@@ -254,7 +254,7 @@ impl LocalRouter {
         &self,
         subscriber: Arc<Subscriber>,
         receiver: Option<Arc<dyn Receiver>>,
-    ) -> Result<()> {
+    ) -> peer::error::Result<()> {
         if subscriber.no_auto_subscribe {
             info!("Router[{}] add_down_tracks Subscriber skips [no_auto_subscribe]", self.id);
             return Ok(());
@@ -269,7 +269,7 @@ impl LocalRouter {
             if let Err(err) = self.add_down_track(subscriber.clone(), receiver).await {
                 error!("add_down_track err: {}", err);
             };
-            return subscriber.negotiate(None).await;
+            subscriber.negotiate(None).await?;
         }
 
         let recs = self.receivers.lock().await

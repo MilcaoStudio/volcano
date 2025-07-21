@@ -28,7 +28,7 @@ use serde::Serialize;
 
 use crate::track::router::LocalRouter;
 
-use super::peer::Peer;
+use super::peer::PubSubPeer;
 
 /// Room event which indicates something happened to a peer
 #[derive(Debug, Clone, Serialize)]
@@ -82,7 +82,7 @@ pub struct Room {
     //participants: DashSet<String>,
     //audio_observer: Arc<Mutex<AudioObserver>>,
     user_tracks: DashMap<String, Vec<String>>,
-    peers: DashMap<String, Arc<Peer>>,
+    peers: DashMap<String, Arc<PubSubPeer>>,
     tracks: DashMap<String, Arc<TrackLocalStaticRTP>>,
 }
 
@@ -228,7 +228,7 @@ impl Room {
         }
     }
 
-    pub async fn add_peer(&self, peer: Arc<Peer>) {
+    pub async fn add_peer(&self, peer: Arc<PubSubPeer>) {
         let id = peer.id();
         self.peers.insert(id, peer);
     }
@@ -269,7 +269,7 @@ impl Room {
         data_channels
     }
 
-    pub async fn get_peer(&self, peer_id: &str) -> Option<Arc<Peer>> {
+    pub async fn get_peer(&self, peer_id: &str) -> Option<Arc<PubSubPeer>> {
         self.peers.get(peer_id).map(|peer| peer.clone())
     }
 
@@ -367,7 +367,7 @@ impl Room {
         }
     }
 
-    pub async fn subscribe(self: &Arc<Self>, peer: Arc<Peer>) {
+    pub async fn subscribe(self: &Arc<Self>, peer: Arc<PubSubPeer>) {
         info!("Subscribing a new peer");
 
         // Subscriber data channels to peer subscriber

@@ -1,14 +1,11 @@
 use anyhow::Result;
 use std::{
     fmt::Debug,
-    future::Future,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
-use subscriber::Subscriber;
 use tokio::sync::Mutex;
 use webrtc::{
     ice_transport::{
@@ -21,46 +18,21 @@ use webrtc::{
     },
 };
 
-use crate::rtc::peer::publisher::Publisher;
-
-use super::{config::WebRTCTransportConfig, room::Room};
+use crate::rtc::{config::WebRTCTransportConfig, room::Room};
 use crate::track::error::Error;
-
-mod api;
-mod publisher;
-pub mod subscriber;
-
-pub type OnOfferFn = Box<
-    dyn (FnMut(RTCSessionDescription) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
-        + Send
-        + Sync,
->;
-
-pub type OnIceCandidateFn = Box<
-    dyn (FnMut(RTCIceCandidateInit, u8) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
-        + Send
-        + Sync,
->;
-
-pub type OnIceConnectionStateChangeFn = Box<
-    dyn (FnMut(RTCIceConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
-        + Send
-        + Sync,
->;
+use super::{PeerConfig, Publisher, Subscriber, OnICEConnectionStateChangeFn, OnPubSubICECandidateFn, OnOfferFn};
 
 const PUBLISHER: u8 = 0;
 const SUBSCRIBER: u8 = 1;
 
-#[derive(Debug, Default, Deserialize)]
-pub struct JoinConfig {
-    pub no_publish: bool,
-    pub no_subscribe: bool,
-    pub no_auto_subscribe: bool,
-}
-
-/// Abstraction of a WebRTC peer connection
-#[derive(Clone)]
-pub struct Peer {
+/// Two peer connections are used by this peer. Ideal for handling multiple requests.
+/// 
+/// - [Publisher] peer listens for client's remote media tracks and publishes them into the publisher's router.
+/// - [Subscriber] peer subscribes to local tracks and sends them to client's peer connection.
+/// 
+/// Suggestion: Despite of this peer implements [Default] trait, it is recommended to use [Self::new] to set an unique ID for this peer.
+#[derive(Clone, Default)]
+pub struct PubSubPeer {
     config: Arc<WebRTCTransportConfig>,
     closed: Arc<AtomicBool>,
     id: String,
@@ -68,38 +40,23 @@ pub struct Peer {
     subscriber: Arc<Mutex<Option<Arc<Subscriber>>>>,
     user_id: String,
     track_map: Arc<Vec<String>>,
-    on_ice_candidate_fn: Arc<Mutex<Option<OnIceCandidateFn>>>,
-    on_ice_connection_state_change: Arc<Mutex<Option<OnIceConnectionStateChangeFn>>>,
+    on_ice_candidate_fn: Arc<Mutex<Option<OnPubSubICECandidateFn>>>,
+    on_ice_connection_state_change: Arc<Mutex<Option<OnICEConnectionStateChangeFn>>>,
     on_offer_fn: Arc<Mutex<Option<OnOfferFn>>>,
     publisher: Arc<Mutex<Option<Arc<Publisher>>>>,
     remote_answer_pending: Arc<AtomicBool>,
     negotiation_pending: Arc<AtomicBool>,
 }
 
-impl Peer {
-    /// Create a new Peer
-    pub async fn new(user_id: String, config: Arc<WebRTCTransportConfig>) -> Result<Self> {
-        // Create track map
-        let track_map = Default::default();
-
-        // Construct new Peer
-        let peer = Self {
+impl PubSubPeer {
+    /// Creates a new Peer
+    pub fn new(id: String, config: Arc<WebRTCTransportConfig>) -> Self {
+        Self {
             config,
-            closed: Arc::default(),
-            id: user_id.clone(),
-            room: Arc::default(),
-            user_id,
-            track_map,
-            on_ice_candidate_fn: Arc::default(),
-            on_ice_connection_state_change: Arc::default(),
-            on_offer_fn: Arc::default(),
-            publisher: Arc::default(),
-            subscriber: Arc::new(Mutex::new(None)),
-            negotiation_pending: Arc::default(),
-            remote_answer_pending: Arc::default(),
-        };
-
-        Ok(peer)
+            user_id: id.clone(),
+            id,
+            ..Default::default()
+        }
     }
 
     pub async fn answer(&self, sdp: RTCSessionDescription) -> Result<RTCSessionDescription> {
@@ -142,7 +99,7 @@ impl Peer {
         self.id.clone()
     }
 
-    pub async fn join(self: &Arc<Self>, room: Arc<Room>, cfg: &JoinConfig) -> Result<()> {
+    pub async fn join(self: &Arc<Self>, room: Arc<Room>, cfg: &PeerConfig) -> Result<()> {
         let id = &self.id;
         info!("[{id}] Join to {} requested", room.id);
 
@@ -170,12 +127,12 @@ impl Peer {
 
         if !cfg.no_publish {
             if !cfg.no_subscribe {
-                for dc in &*room.get_data_channel_middlewares() {
-                    if let Some(sub) = &*self.subscriber.lock().await {
+                if let Some(sub) = &*self.subscriber.lock().await {
+                    for dc in &*room.get_data_channel_middlewares() {
                         sub.add_data_channel(&dc.config.label).await?;
-                        info!("[Subscriber {}] Trying to offer...", sub.id);
-                        sub.create_offer(None).await?;
                     }
+                    info!("[Subscriber {}] Trying to offer...", sub.id);
+                    sub.create_offer(None).await?;
                 }
             }
             let on_ice_candidate_out = self.on_ice_candidate_fn.clone();
@@ -239,7 +196,7 @@ impl Peer {
         self.publisher.lock().await.clone()
     }
 
-    pub async fn register_on_ice_connection_state_change(&self, f: OnIceConnectionStateChangeFn) {
+    pub async fn register_on_ice_connection_state_change(&self, f: OnICEConnectionStateChangeFn) {
         let mut handler = self.on_ice_connection_state_change.lock().await;
         *handler = Some(f);
     }
@@ -301,7 +258,7 @@ impl Peer {
         }));
     }
     
-    pub async fn on_ice_candidate(&self, f: OnIceCandidateFn) {
+    pub async fn on_ice_candidate(&self, f: OnPubSubICECandidateFn) {
         let mut handler = self.on_ice_candidate_fn.lock().await;
         *handler = Some(f);
     }
@@ -359,7 +316,7 @@ impl Peer {
     }
 }
 
-impl Debug for Peer {
+impl Debug for PubSubPeer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Peer")
             .field("config", &self.config.router)

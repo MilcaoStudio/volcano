@@ -8,7 +8,7 @@ use futures::{
 use postage::stream::Stream;
 use volcano_sfu::rtc::{
     config::WebRTCTransportConfig,
-    peer::{JoinConfig, Peer},
+    peer::{PeerConfig, PubSubPeer},
     room::{Room, RoomSignal},
 };
 use webrtc::{
@@ -31,7 +31,7 @@ pub struct Client {
     user: UserInformation,
     pub room: Option<Arc<Room>>,
     pub signal: Arc<RoomSignal>,
-    pub peer: Arc<Peer>,
+    pub peer: Arc<PubSubPeer>,
     db: Arc<ReferenceDb>,
 }
 
@@ -43,7 +43,7 @@ impl Client {
             user: user.clone(),
             room: None,
             signal: RoomSignal::new(Some(user.id.to_owned())),
-            peer: Arc::new(Peer::new(user.id.to_owned(), config).await?),
+            peer: Arc::new(PubSubPeer::new(user.id.to_owned(), config)),
         })
     }
 
@@ -200,7 +200,7 @@ impl Client {
         write: &Sender,
         room: Arc<Room>,
         initial_offer: RTCSessionDescription,
-        cfg: &JoinConfig,
+        cfg: &PeerConfig,
         id: u32,
     ) -> Result<()> {
         // Signaling was experimental.
@@ -286,7 +286,7 @@ impl Client {
     }
 
     pub(super) async fn handle_offer(
-        peer: Arc<Peer>,
+        peer: Arc<PubSubPeer>,
         write: Sender,
         offer: RTCSessionDescription,
         id: u32,

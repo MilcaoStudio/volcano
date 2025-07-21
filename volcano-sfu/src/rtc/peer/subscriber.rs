@@ -16,17 +16,10 @@ use webrtc::{
     ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::RTCPeerConnection,
 };
 
-use super::api;
+use super::{api, OnNegotiateFn, error::Result};
 use crate::rtc::config::WebRTCTransportConfig;
 use crate::rtc::message::RemoteMedia;
 use crate::track::downtrack::DownTrack;
-use crate::track::error::Result;
-
-const HIGH_VALUE: &str = "high";
-const MEDIA_VALUE: &str = "medium";
-const LOW_VALUE: &str = "low";
-const MUTED_VALUE: &str = "none";
-pub const API_CHANNEL_LABEL: &str = "System";
 
 pub struct Subscriber {
     pub id: String,
@@ -45,8 +38,6 @@ pub struct Subscriber {
     api_channel_open: Arc<AtomicBool>,
 }
 
-pub type OnNegotiateFn =
-    Box<dyn (FnMut(Option<RTCOfferOptions>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>) + Send + Sync>;
 pub type OnRenegotiateFn =
     Box<dyn (FnMut(bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>) + Send + Sync>;
 
