@@ -395,30 +395,38 @@ impl Room {
         for cur_peer in self.peers.iter() {
             let cur_id = cur_peer.id();
             let peer_id = peer.id();
-            let publisher = cur_peer.publisher().await;
-            if cur_id == peer_id || publisher.is_none() {
+            if cur_id == peer_id {
                 continue;
             }
 
-            info!(
-                "PeerLocal Subscribe to publisher streams , cur_peer_id:{} , peer_id:{}",
-                cur_id, peer_id
-            );
+            if let Some(p) = cur_peer.publisher().await {
+                info!(
+                    "[Room {}] Peer {} subscribes to tracks from router {}. No receivers.",
+                    self.id, peer_id, cur_id
+                );
 
-            let p = publisher.unwrap();
-            let router = p.router();
-            if router
-                .add_down_tracks(peer.subscriber().await.unwrap(), None)
-                .await
-                .is_err()
-            {
-                continue;
+                let current_router = p.router();
+                if let Some(sub) = peer.subscriber().await {
+                    // Negotiation is required, despite of add_down_tracks returns Ok(false)
+                    if current_router
+                        .add_down_tracks(sub.clone(), None)
+                        .await
+                        .is_err()
+                    {
+                        continue;
+                    }
+                } else {
+                    warn!(
+                        "[Room {}] Expected peer {} subscriber. Got None.",
+                        self.id, peer_id
+                    );
+                }
             }
+        }
 
-            info!("Subscribe Negotiate");
-            if let Err(err) = peer.subscriber().await.unwrap().negotiate(None).await {
-                error!("negotiate error: {}", err);
-            }
+        info!("Subscribe Negotiate");
+        if let Err(err) = peer.subscriber().await.unwrap().negotiate(None).await {
+            error!("negotiate error: {}", err);
         }
 
         // Offer API data channel to client subscriber
@@ -483,21 +491,43 @@ impl Room {
         receiver: Arc<dyn crate::track::receiver::Receiver>,
     ) {
         for peer in self.peers.iter() {
-            let subscriber = peer.subscriber().await;
             let peer_id = peer.id();
             // no subscriber or same id = no publish
-            if router.id() == peer_id || subscriber.is_none() {
+            if router.id() == peer_id {
                 info!("Same id ({peer_id}) skipped.");
                 continue;
             }
 
-            info!("Publishing track to peer subsriber, peer_id: {}", peer_id);
-            if router
-                .add_down_tracks(peer.subscriber().await.unwrap(), Some(receiver.clone()))
-                .await
-                .is_err()
-            {
+            let Some(sub) = peer.subscriber().await else {
+                warn!(
+                    "[Room {}] Expected peer {} subscriber. Got None.",
+                    self.id, peer_id
+                );
                 continue;
+            };
+
+            info!("Publishing track to peer subsriber, peer_id: {}", peer_id);
+            match router
+                .add_down_tracks(sub.clone(), Some(receiver.clone()))
+                .await
+            {
+                Ok(negotiate) => {
+                    if negotiate {
+                        if let Err(err) = sub.negotiate(None).await {
+                            warn!(
+                                "[Room {}] Peer {} negotiate error: {}",
+                                self.id, peer_id, err
+                            );
+                        };
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        "[Room {}] Publish track to peer {} failed: {}",
+                        self.id, peer_id, err
+                    );
+                    continue;
+                }
             }
         }
     }
