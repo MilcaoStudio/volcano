@@ -50,6 +50,15 @@ pub enum DownTrackType {
     SimulcastDownTrack,
 }
 
+impl Debug for DownTrackType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DownTrackType::SimpleDownTrack => f.write_str("Simple"),
+            DownTrackType::SimulcastDownTrack => f.write_str("Simulcast"),
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct DownTrackInfo {
     pub layer: u8,
@@ -84,7 +93,7 @@ pub struct DownTrackInternal {
 }
 
 impl DownTrackInternal {
-    pub(super) fn new(
+    pub(crate) fn new(
         c: RTCRtpCodecCapability,
         r: Arc<dyn Receiver>,
         max_track: i32,
@@ -885,6 +894,22 @@ impl DownTrack {
 impl PartialEq for DownTrack {
     fn eq(&self, other: &Self) -> bool {
         (self.peer_id == other.peer_id) && (self.down_track_local == other.down_track_local)
+    }
+}
+
+use std::fmt::{Debug, Formatter};
+impl Debug for DownTrack {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownTrack")
+            .field("id", &self.id())
+            .field("peer_id", &self.peer_id)
+            .field("track_type", &self.track_type)
+            .field("current_spatial_layer", &self.current_spatial_layer)
+            .field("target_spatial_layer", &self.target_spatial_layer)
+            .field("temporal_layer", &self.temporal_layer)
+            .field("max_spatial_layer", &self.max_spatial_layer)
+            .field("max_temporal_layer", &self.max_temporal_layer)
+            .finish()
     }
 }
 
