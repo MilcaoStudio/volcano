@@ -19,7 +19,7 @@ use super::{api, OnICEConnectionStateChangeFn};
 
 pub struct Publisher {
     id: String,
-
+    
     pc: Arc<RTCPeerConnection>,
 
     router: Arc<LocalRouter>,
@@ -95,16 +95,28 @@ impl Publisher {
     }
 
     pub async fn answer(&self, offer: RTCSessionDescription) -> Result<RTCSessionDescription> {
-        self.pc.set_remote_description(offer).await?;
+        let mut candidates = self.candidates.lock().await;
 
-        for c in &*self.candidates.lock().await {
+        if let Some(current_session) = self.pc.current_remote_description().await
+            .and_then(|desc| desc.unmarshal().ok()) {
+                if let Some(new_session) = offer.unmarshal().ok() {
+                    if new_session.origin.session_version > current_session.origin.session_version {
+                        warn!("This offer contains a new session version. Add candidates from cache is not recommended.")
+                    }
+                }
+        }
+
+        self.pc.set_remote_description(offer).await?;
+        for c in &*candidates {
             if let Err(err) = self.pc.add_ice_candidate(c.clone()).await {
-                error!("expected answer error :{}", err);
+                warn!("[Publisher {}] Add candidate into peer connection failed: {}", self.id, err);
             }
         }
 
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer.clone()).await?;
+
+        candidates.clear();
 
         Ok(answer)
     }
