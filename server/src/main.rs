@@ -1,7 +1,7 @@
 use std::fs;
 
 use clap::Parser;
-use volcano_sfu::rtc::config;
+use volcano_sfu::rtc::config::Config;
 
 #[macro_use]
 extern crate log;
@@ -9,6 +9,7 @@ extern crate log;
 extern crate serde;
 
 pub mod signaling;
+mod logger;
 mod models;
 mod reference;
 
@@ -20,7 +21,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    pretty_env_logger::init_timed();
+    logger::try_init_logger()?;
     let file_content = {
         // Drop cli before server launch
         let cli = Cli::parse();
@@ -29,11 +30,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let config = match &file_content{
         Ok(data) => {
-            config::load(data).inspect_err(|e| error!("Error loading config data: {e}.\nLoading default config.")).unwrap_or_default()
+            Config::from_toml(data).inspect_err(|e| error!("Error loading config data: {e}.\nLoading default config.")).unwrap_or_default()
         },
         Err(e) => {
             error!("Error loading config file: {e}.\nLoading default config.");
-            config::Config::default()
+            Config::default()
         }
     };
   
