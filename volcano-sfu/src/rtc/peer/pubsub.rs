@@ -261,9 +261,8 @@ impl PubSubPeer {
                 subscriber.set_remote_description(sdp).await?;
                 self.remote_answer_pending.store(false, Ordering::Relaxed);
 
-                if self.negotiation_pending.load(Ordering::Relaxed) {
-                    self.negotiation_pending.store(false, Ordering::Relaxed);
-                    info!("Subscriber negotiate");
+                if self.negotiation_pending.swap(false, Ordering::Relaxed) {
+                    info!("Negotiation pending. Start new negotiation.");
                     subscriber.negotiate(None).await?;
                 }
 
