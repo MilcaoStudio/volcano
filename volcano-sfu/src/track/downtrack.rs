@@ -398,7 +398,7 @@ impl DownTrack {
         self.down_track_local.bound.load(Ordering::Relaxed)
     }
 
-    /// Closes the track and calls the close handler.
+    /// Calls the close handler
     pub async fn close(&self) {
         let mut handler = self.on_close_handler.lock().await;
         if let Some(f) = &mut *handler {
@@ -461,7 +461,7 @@ impl DownTrack {
             self.down_track_local.re_sync.store(val, Ordering::Relaxed);
         }
     }
-
+    
     /// Creates a new simple `DownTrack` from a `DownTrackInternal` and the ID of the peer where this belongs to.
     pub fn new_track_local(peer_id: String, track: Arc<DownTrackInternal>) -> Self {
         Self {

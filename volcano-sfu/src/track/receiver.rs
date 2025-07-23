@@ -235,6 +235,24 @@ impl WebRTCReceiver {
             on_close_handler: Arc::default(), // ..Default::default()
         }
     }
+
+    async fn is_recent_pli(&self) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let threshold: u64 = 500;
+
+        // Last PLI is recent (<500 milliseconds), do not send rtcp
+        if now - self.last_pli.load(Ordering::Relaxed) < threshold {
+            return true;
+        }
+        
+        // Store current time as last PLI
+        self.last_pli.store(now, Ordering::Relaxed);
+        false
+    }
 }
 #[async_trait]
 impl Receiver for WebRTCReceiver {
@@ -421,7 +439,8 @@ impl Receiver for WebRTCReceiver {
         temporal_layers
     }
 
-    /// Closes and removes the downtrack with matching `id` on given `layer`
+    /// Removes the downtrack with matching `id` on given `layer`.
+    /// The downtrack is closed, but the internal track may still be open
     async fn delete_down_track(&self, layer: usize, id: String) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::ReceiverClosed);
@@ -447,25 +466,6 @@ impl Receiver for WebRTCReceiver {
     }
 
     async fn send_rtcp(&self, p: Vec<Box<dyn RtcpPacket + Send + Sync>>) -> Result<()> {
-        // Checks if first packet is PLI
-        if let Some(packet) = p.first() {
-            if packet.as_any().downcast_ref::<webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>().is_some() {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-
-                let threshold: u64 = 500;
-
-                // Last PLI is recent (<500 milliseconds), do not send rtcp
-                if now - self.last_pli.load(Ordering::Relaxed) < threshold {
-                    return Ok(());
-                }
-                // Store current time as last PLI
-                self.last_pli.store(now, Ordering::Relaxed);
-            }
-        }
-
         if self.rtcp_sender.send(p).await.is_err() {
             return Err(Error::ErrChannelSend);
         }
@@ -579,16 +579,20 @@ impl Receiver for WebRTCReceiver {
                                 self.pending_tracks[layer].lock().await.clear();
                                 self.pending[layer].store(false, Ordering::Relaxed);
                             } else {
-                                let sender_ssrc = rand::random::<u32>();
-                                let media_ssrc = self.ssrc(layer).await;
-                                debug!(
-                                    "Send PLI, sender ssrc {sender_ssrc}, media_ssrc {media_ssrc}"
-                                );
-                                self.send_rtcp(vec![Box::new(PictureLossIndication {
-                                    sender_ssrc,
-                                    media_ssrc,
-                                })])
-                                .await?;
+                                if !self.is_recent_pli().await {
+                                    let sender_ssrc = rand::random::<u32>();
+                                    let media_ssrc = self.ssrc(layer).await;
+                                    
+                                    
+                                    debug!(
+                                        "Send PLI, sender ssrc {sender_ssrc}, media_ssrc {media_ssrc}"
+                                    );
+                                    self.send_rtcp(vec![Box::new(PictureLossIndication {
+                                        sender_ssrc,
+                                        media_ssrc,
+                                    })])
+                                    .await?;
+                                }
                             }
                         }
 
