@@ -4,7 +4,7 @@ use tokio::{net::UdpSocket, sync::Mutex};
 use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}};
 use anyhow::Result;
 
-use crate::{buffer::AtomicFactory, track::error::ConfigError};
+use crate::{buffer::AtomicFactory};
 
 #[cfg(feature = "turn")]
 use crate::turn::TurnConfig;
@@ -101,11 +101,16 @@ pub struct Config {
     pub turn_auth: Option<Arc<dyn AuthHandler + Send + Sync>>,
 }
 
+impl Config {
 
-pub fn load(content: &str) -> Result<Config, ConfigError> {
-    let decoded_config = toml::from_str(content).unwrap();
-    Ok(decoded_config)
+    /// Parses provided file content as TOML.
+    #[cfg(feature="toml")]
+    pub fn from_toml(content: &str) -> Result<Config, toml::de::Error> {
+        toml::from_str(content)
+    }
 }
+
+
 
 impl WebRTCTransportConfig {
     pub async fn new(c: &Config) -> Result<Self> {
