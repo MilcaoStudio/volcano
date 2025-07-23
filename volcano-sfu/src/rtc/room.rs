@@ -205,29 +205,6 @@ impl Room {
         }
     }
 
-    pub(crate) async fn add_api_channel(self: &Arc<Self>, id: &str) {
-        let room_id = &self.id;
-        match self.get_peer(id).await {
-            Some(peer) => {
-                match peer.subscriber().await {
-                    Some(subscriber) => {
-                        // on_open channel listener moved to subscriber.rs
-
-                        if let Err(err) = subscriber.negotiate(None).await {
-                            error!("[Room {room_id}] add_api_channel negotiate error: {}", err);
-                        }
-                    }
-                    _ => {
-                        warn!("[Room {room_id}] add_api_channel No subscriber available");
-                    }
-                }
-            }
-            _ => {
-                error!("[Room {room_id}] Unknown peer {id}");
-            }
-        }
-    }
-
     pub async fn add_peer(&self, peer: Arc<PubSubPeer>) {
         let id = peer.id();
         self.peers.insert(id, peer);
@@ -428,9 +405,6 @@ impl Room {
         if let Err(err) = peer.subscriber().await.unwrap().negotiate(None).await {
             error!("negotiate error: {}", err);
         }
-
-        // Offer API data channel to client subscriber
-        self.add_api_channel(&peer.id()).await;
     }
     /// Remove a user from the room
     pub async fn remove_user(&self, id: &str) {
