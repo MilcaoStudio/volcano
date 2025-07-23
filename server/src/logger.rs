@@ -9,20 +9,35 @@ pub(crate) fn try_init_logger() -> Result<(), log::SetLoggerError> {
 
     // 1. Custom format + outputs
     let (_, log) = fern::Dispatch::new()
-    .format(move |out, message, record| {
-        let formatted = format!(
-            "{} {} {}{} > {}",
-            chrono::Local::now().format("[%Y-%m-%d %H:%M:%S]"),
-            colors.color(record.level()),
-            record.target(),
-            record.line().map_or("".to_string(), |l| format!(":{l}")),
-            message
-        );
-        out.finish(format_args!("{}", formatted))
-    })
-    .chain(std::io::stdout())
-    .chain(fern::DateBased::new("logs/", "%Y-%m-%d %H:%M server.log"))
-    .into_log();
+        .chain(
+            fern::Dispatch::new()
+                .format(move |out, message, record| {
+                    let formatted = format!(
+                        "{} {} {} > {}",
+                        chrono::Local::now().format("[%Y-%m-%d %H:%M:%S]"),
+                        colors.color(record.level()),
+                        record.target(),
+                        message
+                    );
+                    out.finish(format_args!("{}", formatted))
+                })
+                .chain(std::io::stdout()),
+        )
+        .chain(
+            fern::Dispatch::new()
+                .format(|out, message, record| {
+                    let formatted = format!(
+                        "{} {} {} > {}",
+                        chrono::Local::now().format("[%Y-%m-%d %H:%M:%S]"),
+                        record.level(),
+                        record.target(),
+                        message
+                    );
+                    out.finish(format_args!("{}", formatted))
+                })
+                .chain(fern::DateBased::new("", "%Y-%m-%d.log")),
+        )
+        .into_log();
 
     // 2. Env filter
     let filter = env_filter::Builder::from_env("RUST_LOG").build();
