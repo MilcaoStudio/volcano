@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{pin::Pin, sync::Arc};
 
 use dashmap::DashMap;
@@ -45,6 +46,7 @@ pub type OnDelReciverTrackFn = Box<
         + Sync,
 >;
 pub struct LocalRouter {
+    closed: AtomicBool,
     id: String,
     pub audio_observer: Arc<Mutex<AudioObserver>>,
     //twcc: Arc<Mutex<Option<Responder>>>,
@@ -74,6 +76,7 @@ impl LocalRouter {
         let audio_filter = config.audio_level_filter;
         let audio_observer = AudioObserver::new(audio_threshold, audio_interval, audio_filter);
         Self {
+            closed: AtomicBool::default(),
             id,
             //twcc: Arc::new(Mutex::new(None)),
             //stats: Arc::new(Mutex::new(HashMap::new())),
@@ -568,8 +571,15 @@ impl LocalRouter {
         }
     }
 
-    /// Sends `stop` signal in this router, and safely closes all receivers.
+    /// Sends `stop` signal in this router, and safely shuts down all associated receivers.
+    /// This function is idempotent: it ensures that cleanup logic runs only once.
+    /// Subsequent calls have no effect and return immediately.
     pub async fn stop(&self) {
+
+        if self.closed.swap(true, Ordering::SeqCst) {
+            trace!("[Router {}] stop, router already closed.", self.id);
+            return;
+        }
         
         info!("[Router {}] Stopping receivers", self.id);
         for item in self.receivers.lock().await.iter() {
