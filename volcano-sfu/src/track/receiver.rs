@@ -651,12 +651,12 @@ impl WebRTCReceiver {
     /// Closes all the not available tracks of the receiver, and set the receiver to closed state.
     /// Calls the on_close handler if it is set.
     pub async fn close_tracks(&self) {
-        for (idx, a) in self.available.lock().await.iter().enumerate() {
-            if a.load(Ordering::Relaxed) {
+        for dt in self.down_tracks.iter() {
+            let down_tracks = dt.lock().await;
+            if down_tracks.is_empty() {
                 continue;
             }
-            let down_tracks = self.down_tracks[idx].lock().await;
-
+            
             for dt in &*down_tracks {
                 dt.close().await;
             }
