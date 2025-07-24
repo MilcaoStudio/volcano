@@ -122,7 +122,7 @@ impl LocalRouter {
     pub async fn add_down_track(
         &self,
         subscriber: Arc<Subscriber>,
-        receiver: Arc<dyn Receiver>,
+        receiver: Arc<WebRTCReceiver>,
     ) -> Result<Arc<DownTrack>> {
         let downtracks = subscriber.get_tracks(&receiver.stream_id()).await;
         // Checks for available tracks
@@ -256,7 +256,7 @@ impl LocalRouter {
     pub async fn add_down_tracks(
         &self,
         subscriber: Arc<Subscriber>,
-        receiver: Option<Arc<dyn Receiver>>,
+        receiver: Option<Arc<WebRTCReceiver>>,
     ) -> peer::error::Result<bool> {
 
         let mut should_negotiate = false;
@@ -316,7 +316,7 @@ impl LocalRouter {
         track: Arc<TrackRemote>,
         //track_id: String,
         //stream_id: String,
-    ) -> (Arc<dyn Receiver>, bool) {
+    ) -> (Arc<WebRTCReceiver>, bool) {
         let track_id = track.id();
         let stream_id = track.stream_id();
         info!(

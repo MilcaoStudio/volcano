@@ -101,7 +101,8 @@ impl Publisher {
             .and_then(|desc| desc.unmarshal().ok()) {
                 if let Some(new_session) = offer.unmarshal().ok() {
                     if new_session.origin.session_version > current_session.origin.session_version {
-                        warn!("This offer contains a new session version. Add candidates from cache is not recommended.")
+                        candidates.clear();
+                        debug!("This offer contains a new session version. Candidates are cleaned up.");
                     }
                 }
         }
@@ -115,8 +116,6 @@ impl Publisher {
 
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer.clone()).await?;
-
-        candidates.clear();
 
         Ok(answer)
     }

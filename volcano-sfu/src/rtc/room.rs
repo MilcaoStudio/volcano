@@ -26,7 +26,7 @@ use webrtc::{
 
 use serde::Serialize;
 
-use crate::track::router::LocalRouter;
+use crate::track::{receiver::WebRTCReceiver, router::LocalRouter};
 
 use super::peer::PubSubPeer;
 
@@ -325,7 +325,10 @@ impl Room {
             user_id: id.clone(),
             user_tracks: tracks.clone(),
         };
-        self.send_message(ev).await;
+        
+        if self.user_tracks.len() > 0 {
+            self.send_message(ev).await;
+        }
 
         // Insert tracks
         self.user_tracks.insert(id, tracks);
@@ -427,12 +430,14 @@ impl Room {
             .await;
         }
 
-        // Let everyone know we left
-        self.send_message(RoomEvent::UserLeft {
-            room_id: self.id.clone(),
-            user_id: id.to_owned(),
-        })
-        .await;
+        if self.user_tracks.len() > 0 {
+            // Let everyone know we left
+            self.send_message(RoomEvent::UserLeft {
+                room_id: self.id.clone(),
+                user_id: id.to_owned(),
+            })
+            .await;
+        }
     }
 
     /// Add a local track
@@ -462,7 +467,7 @@ impl Room {
     pub async fn publish_track(
         &self,
         router: Arc<LocalRouter>,
-        receiver: Arc<dyn crate::track::receiver::Receiver>,
+        receiver: Arc<WebRTCReceiver>,
     ) {
         for peer in self.peers.iter() {
             let peer_id = peer.id();

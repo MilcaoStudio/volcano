@@ -138,14 +138,11 @@ impl Subscriber {
 
     pub async fn add_down_track(&self, stream_id: String, down_track: Arc<DownTrack>) {
         let id = &self.id;
+        let dt_id = down_track.id();
         let mut tracks = self.tracks.lock().await;
-        if let Some(dt) = tracks.get_mut(&stream_id) {
-            info!("[Subscriber {id}] add_down_track push into stream {stream_id}");
-            dt.push(down_track);
-            return;
-        }
-        info!("[Subscriber {id}] add_down_track add stream {stream_id} with 0 tracks");
-        tracks.insert(stream_id, Vec::new());
+        let vec = tracks.entry(stream_id.clone()).or_insert(Vec::default());
+        info!("[Subscriber {id}] add_down_track {dt_id} into stream {stream_id}");
+        vec.push(down_track);
     }
 
     pub async fn add_ice_candidate(&self, candidate: RTCIceCandidateInit) -> Result<()> {

@@ -236,7 +236,7 @@ impl WebRTCReceiver {
         }
     }
 
-    async fn is_recent_pli(&self) -> bool {
+    pub(super) async fn is_recent_pli(&self) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

@@ -30,7 +30,7 @@ use crate::{
     },
     track::{
         downtrack::{DownTrack, DownTrackInternal},
-        receiver::Receiver,
+        receiver::{Receiver, WebRTCReceiver},
         router::LocalRouter,
     },
 };
@@ -101,7 +101,7 @@ impl CentralPeer {
         self.channels.insert(channel.label().to_owned(), channel);
     }
 
-    async fn add_down_track(self: &Arc<Self>, receiver: Arc<dyn Receiver>) -> Result<()> {
+    async fn add_down_track(self: &Arc<Self>, receiver: Arc<WebRTCReceiver>) -> Result<()> {
         let tracks = self.downtracks.get(&receiver.stream_id());
         // Checks for available tracks
         if let Some(downtracks) = tracks {
