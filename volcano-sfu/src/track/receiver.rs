@@ -107,6 +107,16 @@ pub trait Receiver: Send + Sync {
     /// Bitrates of each layer.
     async fn get_bitrates(&self) -> Vec<u64>;
 
+    /// Gets the next available layer for the next track.
+    /// 
+    /// # Arguments
+    /// - `best_quality_first`: If true, returns the highest quality layer available. Otherwise, returns the lowest available.
+    /// 
+    /// # Returns
+    /// - Layer index (0-2) if an available layer is found for a simulcast track.
+    /// - Layer 0 for a simple track.
+    async fn get_available_layer(&self, best_quality_first: bool) -> usize;
+
     /// Returns the maximum temporal layer of each layer.
     async fn get_max_temporal_layers(&self) -> Vec<i32>;
 
@@ -359,18 +369,11 @@ impl Receiver for WebRTCReceiver {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::ReceiverClosed);
         }
-        let mut layer = 0;
+        
+        let layer = self.get_available_layer(best_quality_first).await;
 
         let track_id = track.id();
         if self.is_simulcast {
-            for (idx, v) in self.available.lock().await.iter().enumerate() {
-                if v.load(Ordering::Relaxed) {
-                    layer = idx;
-                    if !best_quality_first {
-                        break;
-                    }
-                }
-            }
             if self.down_track_subscribed(layer, track.clone()).await {
                 debug!("Track {} already subscribed", track_id);
                 return Err(Error::DuplicatedTrack(layer));
@@ -388,7 +391,7 @@ impl Receiver for WebRTCReceiver {
             );
         } else {
             if self.down_track_subscribed(layer, track.clone()).await {
-                debug!("Track {} already subscribed", track_id);
+                warn!("Track {track_id} already subscribed. If you wish to replace it, please delete the down track with same ID from layer #0");
                 return Err(Error::DuplicatedTrack(layer));
             }
 
@@ -426,6 +429,23 @@ impl Receiver for WebRTCReceiver {
         }
         bitrates
     }
+
+    async fn get_available_layer(&self, best_quality_first: bool) -> usize {
+        let mut layer = 0;
+        if self.is_simulcast {
+            for (idx, v) in self.available.lock().await.iter().enumerate() {
+                if v.load(Ordering::Relaxed) {
+                    layer = idx;
+                    if !best_quality_first {
+                        return layer;
+                    }
+                }
+            }
+        }
+
+        layer
+    }
+
     async fn get_max_temporal_layers(&self) -> Vec<i32> {
         let mut temporal_layers = Vec::new();
 
