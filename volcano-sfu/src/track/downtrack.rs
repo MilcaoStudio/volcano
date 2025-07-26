@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use webrtc::rtp::sequence::Sequencer;
 use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 use webrtc::error::Error as RTCError;
@@ -77,7 +78,7 @@ pub struct DownTrackInternal {
     mime: Mutex<String>,
     ssrc: Mutex<u32>,
     stream_id: String,
-    max_track: i32,
+    max_track: u32,
     payload_type: Mutex<u8>,
     sequencer: Arc<Mutex<AtomicSequencer>>,
     buffer_factory: AtomicFactory,
@@ -95,7 +96,7 @@ pub struct DownTrackInternal {
 }
 
 impl DownTrackInternal {
-    pub(crate) fn new(c: RTCRtpCodecCapability, r: Arc<WebRTCReceiver>, max_track: i32) -> Self {
+    pub(crate) fn new(c: RTCRtpCodecCapability, r: Arc<WebRTCReceiver>, max_track: u32) -> Self {
         Self {
             codec: c,
             id: r.track_id(),
@@ -106,7 +107,7 @@ impl DownTrackInternal {
             stream_id: r.stream_id(),
             max_track,
             payload_type: Mutex::default(),
-            sequencer: Arc::default(),
+            sequencer: Mutex::new(AtomicSequencer::new(max_track)).into(),
             buffer_factory: AtomicFactory::default(),
             enabled: AtomicBool::default(),
             re_sync: AtomicBool::default(),
@@ -334,10 +335,27 @@ pub struct DownTrack {
     /// Packet payload stored in buffer.
     pub payload: Vec<u8>,
 
-    current_spatial_layer: AtomicI32,
-    target_spatial_layer: AtomicI32,
+    current_spatial_layer: AtomicU8,
+    target_spatial_layer: AtomicU8,
     /// Temporal layer of the track. Always 0 for simple tracks.
-    pub temporal_layer: AtomicI32,
+    /// 
+    /// Highest 2 bytes represent a target layer, and the lowest 2 bytes represent the current layer.
+    /// # Example
+    /// ```no_run
+    /// let tid = 0u16;
+    /// let current_layer = layer as u16;
+    /// let current_target_layer = (layer >> 16) as u16;
+    /// 
+    /// if current_target_layer != current_layer {
+    ///     if tid <= current_target_layer {
+    ///         downtrack.temporal_layer.store(
+    ///             ((current_target_layer as u32) << 16) | current_target_layer as u32,
+    ///             Ordering::Relaxed,
+    ///         )
+    ///     }
+    /// }
+    /// ```
+    pub temporal_layer: AtomicU32,
 
     sn_offset: Mutex<u16>,
     ts_offset: Mutex<u32>,
@@ -348,9 +366,9 @@ pub struct DownTrack {
     /// Simulcast track helpers.
     pub simulcast: Arc<Mutex<SimulcastTrackHelpers>>,
     /// Maximum spatial layer of the track.
-    pub max_spatial_layer: AtomicI32,
+    pub max_spatial_layer: AtomicU8,
     /// Maximum temporal layer of the track.
-    pub max_temporal_layer: AtomicI32,
+    pub max_temporal_layer: AtomicU32,
     /// RTCP transceiver of the track.
     pub transceiver: Option<Arc<RTCRtpTransceiver>>,
     on_close_handler: Arc<Mutex<Option<OnCloseFn>>>,
@@ -367,22 +385,22 @@ impl DownTrack {
         c: RTCRtpCodecCapability,
         r: Arc<WebRTCReceiver>,
         peer_id: String,
-        max_track: i32,
+        max_track: u32,
     ) -> Self {
         Self {
             peer_id,
             track_type: Mutex::new(DownTrackType::SimpleDownTrack),
             payload: Vec::new(),
-            current_spatial_layer: AtomicI32::default(),
-            target_spatial_layer: AtomicI32::default(),
-            temporal_layer: AtomicI32::default(),
+            current_spatial_layer: AtomicU8::default(),
+            target_spatial_layer: AtomicU8::default(),
+            temporal_layer: AtomicU32::default(),
             sn_offset: Mutex::default(),
             ts_offset: Mutex::default(),
             last_sn: Mutex::default(),
             last_ts: Mutex::default(),
             simulcast: Arc::new(Mutex::new(SimulcastTrackHelpers::new())),
-            max_spatial_layer: AtomicI32::default(),
-            max_temporal_layer: AtomicI32::default(),
+            max_spatial_layer: AtomicU8::default(),
+            max_temporal_layer: AtomicU32::default(),
             transceiver: Option::default(),
             on_close_handler: Arc::default(),
             //close_once: Once::new(),
@@ -438,8 +456,8 @@ impl DownTrack {
     }
 
     /// Current spatial layer of the track.
-    pub fn current_spatial_layer(&self) -> i32 {
-        self.current_spatial_layer.load(Ordering::Relaxed)
+    pub fn current_spatial_layer(&self) -> u8 {
+        self.current_spatial_layer.load(Ordering::Acquire)
     }
 
     /// ID of the track.
@@ -471,9 +489,9 @@ impl DownTrack {
             track_type: Mutex::new(DownTrackType::SimpleDownTrack),
             payload: Vec::default(),
 
-            current_spatial_layer: AtomicI32::default(),
-            target_spatial_layer: AtomicI32::default(),
-            temporal_layer: AtomicI32::default(),
+            current_spatial_layer: AtomicU8::default(),
+            target_spatial_layer: AtomicU8::default(),
+            temporal_layer: AtomicU32::default(),
 
             sn_offset: Mutex::default(),
             ts_offset: Mutex::default(),
@@ -482,8 +500,8 @@ impl DownTrack {
             last_ts: Mutex::default(),
 
             simulcast: Arc::new(Mutex::new(SimulcastTrackHelpers::new())),
-            max_spatial_layer: AtomicI32::default(),
-            max_temporal_layer: AtomicI32::default(),
+            max_spatial_layer: AtomicU8::default(),
+            max_temporal_layer: AtomicU32::default(),
 
             transceiver: None,
             on_close_handler: Arc::default(),
@@ -527,12 +545,12 @@ impl DownTrack {
     /// let down_track = DownTrack::new_track_local("test".to_owned(), local_track);
     /// down_track.set_initial_layers(0, 0);
     /// ```
-    pub fn set_initial_layers(&self, spatial_layer: i32, temporal_layer: i32) {
+    pub fn set_initial_layers(&self, spatial_layer: u8, temporal_layer: u32) {
         self.current_spatial_layer
-            .store(spatial_layer, Ordering::Relaxed);
+            .store(spatial_layer, Ordering::Release);
         self.target_spatial_layer
-            .store(spatial_layer, Ordering::Relaxed);
-        self.temporal_layer.store(temporal_layer, Ordering::Relaxed);
+            .store(spatial_layer, Ordering::Release);
+        self.temporal_layer.store(temporal_layer, Ordering::Release);
     }
 
     /// Atomically sets the last SSRC of the track.
@@ -543,13 +561,13 @@ impl DownTrack {
     }
 
     /// Atomically sets the maximum spatial layer of the track.
-    pub fn set_max_spatial_layer(&self, val: i32) {
+    pub fn set_max_spatial_layer(&self, val: u8) {
         self.max_spatial_layer.store(val, Ordering::Release);
     }
 
     /// Atomically sets the maximum temporal layer of the track.
-    pub fn set_max_temporal_layer(&self, val: i32) {
-        self.max_spatial_layer.store(val, Ordering::Release);
+    pub fn set_max_temporal_layer(&self, val: u32) {
+        self.max_temporal_layer.store(val, Ordering::Release);
     }
 
     /// Sets the [DownTrackType] of the track.
@@ -577,13 +595,13 @@ impl DownTrack {
     /// - `Error::ErrWebRTC` if the error is from webrtc.
     pub async fn switch_spatial_layer(
         self: &Arc<Self>,
-        target_layer: i32,
+        target_layer: u8,
         set_as_max: bool,
     ) -> Result<()> {
         match *self.track_type.lock().await {
             DownTrackType::SimulcastDownTrack => {
-                let csl = self.current_spatial_layer.load(Ordering::Relaxed);
-                if csl != self.target_spatial_layer.load(Ordering::Relaxed) || csl == target_layer {
+                let csl = self.current_spatial_layer.load(Ordering::Acquire);
+                if csl != self.target_spatial_layer.load(Ordering::Acquire) || csl == target_layer {
                     return Err(Error::FullSpatialLayer(target_layer));
                 }
                 let receiver = &self.down_track_local.receiver;
@@ -593,10 +611,10 @@ impl DownTrack {
                 {
                     Ok(_) => {
                         self.target_spatial_layer
-                            .store(target_layer, Ordering::Relaxed);
+                            .store(target_layer, Ordering::Release);
                         if set_as_max {
                             self.max_spatial_layer
-                                .store(target_layer, Ordering::Relaxed);
+                                .store(target_layer, Ordering::Release);
                         }
                         debug!(
                             "[Track {}] Switch to spatial layer: {target_layer} (max={set_as_max})",
@@ -623,8 +641,8 @@ impl DownTrack {
     /// No checks in the target layer are performed.
     /// # Arguments
     /// - `layer`: Target spatial layer.
-    pub fn switch_spatial_layer_forced(&self, layer: i32) {
-        self.current_spatial_layer.store(layer, Ordering::Relaxed);
+    pub fn switch_spatial_layer_forced(&self, layer: u8) {
+        self.current_spatial_layer.store(layer, Ordering::Release);
     }
 
     /// Atomically switches the temporal layer of the track.
@@ -632,20 +650,20 @@ impl DownTrack {
     /// # Arguments
     /// - `target_layer`: Target temporal layer.
     /// - `set_as_max`: If true, sets the target layer as the maximum temporal layer.
-    pub async fn switch_temporal_layer(&self, target_layer: i32, set_as_max: bool) {
+    pub async fn switch_temporal_layer(&self, target_layer: u32, set_as_max: bool) {
         match *self.track_type.lock().await {
             DownTrackType::SimulcastDownTrack => {
-                let layer = self.temporal_layer.load(Ordering::Relaxed);
+                let layer = self.temporal_layer.load(Ordering::Acquire);
 
                 if layer == target_layer {
                     return;
                 }
 
-                self.temporal_layer.store(target_layer, Ordering::Relaxed);
+                self.temporal_layer.store(target_layer, Ordering::Release);
 
                 if set_as_max {
                     self.max_temporal_layer
-                        .store(target_layer, Ordering::Relaxed);
+                        .store(target_layer, Ordering::Release);
                 }
                 info!(
                     "[Track {}] Temporal layer: {target_layer} (max={set_as_max})",
@@ -677,25 +695,27 @@ impl DownTrack {
         Ok(())
     }
 
-    /// Writes an extended packet to the track.
+    /// Forwards an Extended Packet from a track receiver to the local track.
     /// # Arguments
     /// - `pkt`: Extended packet.
     /// - `layer`: Layer of the track (ignored for simple tracks).
-    pub async fn write_rtp(&self, pkt: ExtPacket, layer: usize) -> Result<()> {
+    pub async fn forward_rtp(&self, pkt: ExtPacket, layer: usize) -> Result<()> {
         if !self.down_track_local.enabled.load(Ordering::Relaxed) {
             return Ok(());
         }
         if !self.bound() {
             return Ok(());
         }
+        
+        let layer_u8 = (layer & 0xFF) as u8;
 
         match *self.track_type.lock().await {
-            DownTrackType::SimpleDownTrack => self.write_simple_rtp(pkt).await,
-            DownTrackType::SimulcastDownTrack => self.write_simulcast_rtp(pkt, layer as i32).await,
+            DownTrackType::SimpleDownTrack => self.forward_simple_rtp(pkt).await,
+            DownTrackType::SimulcastDownTrack => self.forward_simulcast_rtp(pkt, layer_u8).await,
         }
     }
 
-    async fn write_simple_rtp(&self, packet: ExtPacket) -> Result<()> {
+    async fn forward_simple_rtp(&self, packet: ExtPacket) -> Result<()> {
         let mut ext_packet = packet.clone();
         let ssrc = *self.down_track_local.ssrc.lock().await;
 
@@ -804,6 +824,8 @@ impl DownTrack {
             self.simple_packets_sent_per_second
                 .fetch_add(1, Ordering::SeqCst);
             write_stream.write_rtp(&ext_packet.packet).await?;
+        } else {
+            error!("[Track {}] No write stream. Packet will be not transmited.", self.id());
         }
 
         let mut last_second = self.last_second.lock().await;
@@ -821,7 +843,7 @@ impl DownTrack {
         Ok(())
     }
 
-    async fn write_simulcast_rtp(&self, ext_packet: ExtPacket, layer: i32) -> Result<()> {
+    async fn forward_simulcast_rtp(&self, ext_packet: ExtPacket, layer: u8) -> Result<()> {
         let re_sync = self.down_track_local.re_sync.load(Ordering::Relaxed);
         let csl = self.current_spatial_layer();
 
@@ -937,6 +959,8 @@ impl DownTrack {
                 &cur_packet
             );
             write_stream.write_rtp(&cur_packet.packet).await?;
+        } else {
+            error!("[Track {}] No write stream. Packet will be not transmited.", self.id());
         }
 
         Ok(())
