@@ -4,7 +4,7 @@ use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 use webrtc::error::Error as RTCError;
@@ -337,14 +337,14 @@ pub struct DownTrack {
     current_spatial_layer: AtomicU8,
     target_spatial_layer: AtomicU8,
     /// Temporal layer of the track. Always 0 for simple tracks.
-    /// 
+    ///
     /// Highest 2 bytes represent a target layer, and the lowest 2 bytes represent the current layer.
     /// # Example
     /// ```no_run
     /// let tid = 0u16;
     /// let current_layer = layer as u16;
     /// let current_target_layer = (layer >> 16) as u16;
-    /// 
+    ///
     /// if current_target_layer != current_layer {
     ///     if tid <= current_target_layer {
     ///         downtrack.temporal_layer.store(
@@ -374,8 +374,8 @@ pub struct DownTrack {
 
     octet_count: AtomicU32,
     packet_count: AtomicU32,
-    simple_packets_sent_per_second: AtomicU32,
-    last_second: Mutex<Instant>,
+    packet_sent_count: AtomicU32,
+    last_stats: Mutex<Instant>,
     down_track_local: Arc<DownTrackInternal>,
 }
 
@@ -407,8 +407,8 @@ impl DownTrack {
             packet_count: AtomicU32::default(),
             //max_packet_ts: 0,
             down_track_local: Arc::new(DownTrackInternal::new(c, r, max_track)),
-            simple_packets_sent_per_second: AtomicU32::default(),
-            last_second: Instant::now().into(),
+            packet_sent_count: AtomicU32::default(),
+            last_stats: Instant::now().into(),
         }
     }
 
@@ -509,8 +509,8 @@ impl DownTrack {
             packet_count: AtomicU32::default(),
             //max_packet_ts: 0,
             down_track_local: track,
-            simple_packets_sent_per_second: AtomicU32::default(),
-            last_second: Instant::now().into(),
+            packet_sent_count: AtomicU32::default(),
+            last_stats: Instant::now().into(),
         }
     }
 
@@ -705,13 +705,30 @@ impl DownTrack {
         if !self.bound() {
             return Ok(());
         }
-        
+
         let layer_u8 = (layer & 0xFF) as u8;
 
-        match *self.track_type.lock().await {
+        let res = match *self.track_type.lock().await {
             DownTrackType::SimpleDownTrack => self.forward_simple_rtp(pkt).await,
             DownTrackType::SimulcastDownTrack => self.forward_simulcast_rtp(pkt, layer_u8).await,
+        };
+
+        let seconds_per_stat = 20;
+        if res.is_ok() {
+            let mut instant = self.last_stats.lock().await;
+            if instant.elapsed() >= Duration::from_secs(seconds_per_stat as u64) {
+                let count = self
+                    .packet_sent_count
+                    .swap(0, Ordering::SeqCst) / seconds_per_stat;
+                trace!(
+                    "[Track {}] Sending {count} simple RTP packets per second",
+                    self.id()
+                );
+                *instant = Instant::now();
+            }
         }
+
+        res
     }
 
     async fn forward_simple_rtp(&self, packet: ExtPacket) -> Result<()> {
@@ -820,23 +837,14 @@ impl DownTrack {
 
         let write_stream_val = self.down_track_local.write_stream.lock().await;
         if let Some(write_stream) = &*write_stream_val {
-            self.simple_packets_sent_per_second
+            self.packet_sent_count
                 .fetch_add(1, Ordering::SeqCst);
             write_stream.write_rtp(&ext_packet.packet).await?;
         } else {
-            error!("[Track {}] No write stream. Packet will be not transmited.", self.id());
-        }
-
-        let mut last_second = self.last_second.lock().await;
-        if last_second.elapsed() >= Duration::from_secs(1) {
-            let count = self
-                .simple_packets_sent_per_second
-                .swap(0, Ordering::SeqCst);
-            trace!(
-                "[Track {}] Sending {count} simple RTP packets per second",
+            error!(
+                "[Track {}] No write stream. Packet will be not transmited.",
                 self.id()
             );
-            *last_second = Instant::now();
         }
 
         Ok(())
@@ -959,7 +967,10 @@ impl DownTrack {
             );
             write_stream.write_rtp(&cur_packet.packet).await?;
         } else {
-            error!("[Track {}] No write stream. Packet will be not transmited.", self.id());
+            error!(
+                "[Track {}] No write stream. Packet will be not transmited.",
+                self.id()
+            );
         }
 
         Ok(())

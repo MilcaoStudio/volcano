@@ -123,8 +123,6 @@ impl AudioObserver {
             if stream.total >= self.expected {
                 debug!("[stream {}] {}/{} (acceptable)", stream.id, stream.total, self.expected);
                 stream_ids.push(stream.id.clone());
-            } else {
-                debug!("[stream {}] {}/{} (not acceptable)", stream.id, stream.total, self.expected);
             }
 
             stream.total = 0;
