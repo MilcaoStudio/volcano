@@ -378,6 +378,13 @@ impl AtomicBuffer {
 
     /// Updates the buffer with the given packet and its arrival time.
     /// The packet is added to the bucket. An [ExtPacket] is created and inserted into the packet queue.
+    /// # Responsabilites
+    /// - NACK calculation
+    /// - Buffer stats
+    /// - Store ExtPackets
+    /// - Calculate jitter
+    /// - Call twcc, audio level, and feedback nack handlers
+    /// - Calculate bitrate
     pub async fn calc(&self, packet: Packet, arrival_time: u32) {
         let mut buffer = self.buffer.lock().await;
         let sn = packet.header.sequence_number;
@@ -585,11 +592,12 @@ impl AtomicBuffer {
             if self.buffer.lock().await.closed {
                 return Err(BufferError::ErrIOEof);
             }
-            let ext_packets = &mut self.buffer.lock().await.ext_packets;
 
+            let ext_packets = &mut self.buffer.lock().await.ext_packets;
             if !ext_packets.is_empty() {
-                let ext_pkt = ext_packets.pop_front().unwrap();
-                return Ok(ext_pkt);
+                if let Some(pkt) = ext_packets.pop_front() {
+                    return Ok(pkt);
+                };
             }
             sleep(Duration::from_millis(10)).await;
         }
