@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::{atomic::{AtomicU16, Ordering}, Arc}, time::Instant};
 
 use tokio::sync::Mutex;
 const IGNORE_RETRANSMISSION: u8 = 100;
@@ -39,15 +39,15 @@ impl PacketMeta {
 
 struct Sequencer {
     init: bool,
-    max: u32,
-    seq: BTreeMap<u32, PacketMeta>,
-    step: u32,
+    max: u16,
+    seq: BTreeMap<u16, PacketMeta>,
+    step: u16,
     head_sn: u16,
     start_time: Instant,
 }
 
 impl Sequencer {
-    pub fn new(max_track: u32) -> Self {
+    pub fn new(max_track: u16) -> Self {
         assert!(max_track > 0, "Sequencer max_track must be > 0");
         Self {
             max: max_track,
@@ -61,19 +61,24 @@ impl Sequencer {
 }
 
 pub struct AtomicSequencer {
-    sequencer: Arc<Mutex<Sequencer>>,
+    inner: Arc<Mutex<Sequencer>>,
+    next: AtomicU16,
 }
-
-
 
 impl AtomicSequencer {
     pub fn new(max_track: u32) -> Self {
         Self {
-            sequencer: Arc::new(Mutex::new(Sequencer::new(max_track))),
+            inner: Arc::new(Mutex::new(Sequencer::new(max_track as u16))),
+            next: AtomicU16::default(),
         }
     }
 
-    /// Inserts a new RTP packet into the sequencer and returns the next ordered packet (if available).
+    /// Returns actual count and increments for subsequent calls.
+    pub fn next_sn(&self) -> u16 {
+        self.next.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Inserts a new RTP packet into the sequencer.
     ///
     /// This method handles sequence number tracking, reordering logic, and step management to ensure
     /// packets are emitted in the correct order, even when received out of sequence.
@@ -85,7 +90,7 @@ impl AtomicSequencer {
     /// * `timestamp` - RTP timestamp of the packet.
     /// * `layer` - Spatial/temporal layer index.
     /// * `head` - If true, resets or updates the head reference for sequencing.
-    /// 
+    ///
     pub async fn push(
         &self,
         sn: u16,
@@ -93,41 +98,46 @@ impl AtomicSequencer {
         timestamp: u32,
         layer: u8,
         head: bool,
-    ) -> Option<PacketMeta> {
-        let mut sequencer = self.sequencer.lock().await;
+    ) {
+        let mut inner = self.inner.lock().await;
 
         // Is the first packet?
-        if !sequencer.init {
-            sequencer.head_sn = off_sn;
-            sequencer.init = true;
+        if !inner.init {
+            inner.head_sn = off_sn;
+            inner.init = true;
         }
 
         if head {
-            let distance = off_sn.wrapping_sub(sequencer.head_sn);
-            sequencer.step = (sequencer.step + distance as u32).rem_euclid(sequencer.max);
-            sequencer.head_sn = off_sn;
+            trace!("push (head): Packet #{0}: sn={sn}", inner.step);
+            let distance = off_sn.wrapping_sub(inner.head_sn);
+            inner.step = inner.step.wrapping_add(distance).rem_euclid(inner.max);
+            inner.head_sn = off_sn;
         }
 
-        let cur_step = sequencer.step % sequencer.max;
-        sequencer.seq.insert(
-            cur_step,
-            PacketMeta {
-                source_seq_no: sn,
-                target_seq_no: off_sn,
-                timestamp,
-                layer,
-                ..Default::default()
-            },
+        //let index = inner.step % inner.max;
+
+        let target_seq_no = self.next_sn() % inner.max;
+        
+        let meta = PacketMeta {
+            source_seq_no: sn,
+            target_seq_no,
+            timestamp,
+            layer,
+            ..Default::default()
+        };
+        // Insert by sequence_number
+        inner.seq.insert(
+            target_seq_no,
+            meta,
         );
 
-        sequencer.step += 1;
+        // Safe, step < max
+        inner.step += 1;
 
         // Reset on max reached
-        if sequencer.step >= sequencer.max {
-            sequencer.step = 0;
+        if inner.step >= inner.max {
+            inner.step = 0;
         }
-
-        sequencer.seq.get(&sequencer.step).cloned()
     }
 
     /// Gets a list of packets matching the requested sequence numbers for retransmission,
@@ -147,33 +157,85 @@ impl AtomicSequencer {
     ///     send_rtcp_nack(&packet).await?;
     /// }
     /// ```
-    pub async fn get_seq_no_pairs(&self, seq_nos: &[u16]) -> Vec<PacketMeta> {
-        let mut sequencer = self.sequencer.lock().await;
+    pub async fn get_seq_no_pairs(&self, target_snos: &[u16]) -> Vec<PacketMeta> {
+        let mut inner = self.inner.lock().await;
 
         let mut meta: Vec<PacketMeta> = Vec::new();
 
-        
-        let ref_time = sequencer.start_time.elapsed().as_millis();
+        let elapsed = inner.start_time.elapsed().as_millis();
 
-        for sn in seq_nos {
-            let delta = (sequencer.head_sn.wrapping_sub(*sn)) as u32;
-            // Skip underflow
-            if delta >= sequencer.max {
-                trace!("delta {delta} too high, skipping");
-                continue;
-            }
-            let pos = sequencer.step.wrapping_sub(delta) % sequencer.max;
-
-            if let Some(pkt) = sequencer.seq.get_mut(&pos) {
-                if &pkt.target_seq_no == sn
-                    && (pkt.last_nack == 0 || ref_time.saturating_sub(pkt.last_nack) > IGNORE_RETRANSMISSION as u128)
+        for target in target_snos {
+            if let Some(pkt) = inner.seq.get_mut(target) {
+                if &pkt.target_seq_no == target
+                    //&& (pkt.last_nack == 0
+                     //   || elapsed.saturating_sub(pkt.last_nack) > IGNORE_RETRANSMISSION as u128)
                 {
-                    pkt.last_nack = ref_time;
-                    meta.push(pkt.clone());
+                    let elapsed = if pkt.last_nack == 0 {
+                        (IGNORE_RETRANSMISSION + 1) as u128
+                    } else {
+                        elapsed.saturating_sub(pkt.last_nack)
+                    };
+                    if elapsed > IGNORE_RETRANSMISSION as u128 {
+                        pkt.last_nack = elapsed;
+                        meta.push(pkt.clone());
+                    }
                 }
             }
         }
 
         meta
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn test_sequencer_new() {
+        let sequencer = Sequencer::new(100);
+        assert_eq!(sequencer.max, 100);
+        assert!(sequencer.seq.is_empty());
+        assert_eq!(sequencer.step, 0);
+        assert_eq!(sequencer.head_sn, 0);
+        // Sequencer had not received a packet
+        assert!(!sequencer.init);
+    }
+
+    #[test]
+    #[should_panic = "max_track must be > 0"]
+    fn test_sequencer_new_invalid() {
+        Sequencer::new(0);
+    }
+
+    #[tokio::test]
+    async fn test_atomic_sequencer_push_packets() {
+        let sequencer = AtomicSequencer::new(10);
+
+        for i in 0..5 {
+            sequencer.push(i + 100, i + 100, (i as u32 * 960) + 1_000, 0, false).await;
+        }
+        
+        let packets = sequencer.get_seq_no_pairs(&[0, 1, 2, 3, 4]).await;
+        assert_eq!(packets.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_retransmition() {
+        let sequencer = AtomicSequencer::new(10);
+
+        sequencer.push(100, 100, 1_000, 0, true).await;
+        let search_1 = sequencer.get_seq_no_pairs(&[0]).await;
+        assert_eq!(search_1.len(), 1);
+
+        let search_2 = sequencer.get_seq_no_pairs(&[0]).await;
+        assert!(search_2.is_empty(), "packet should be ignored to prevent flood");
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let search_3 = sequencer.get_seq_no_pairs(&[0]).await;
+        assert_eq!(search_3.len(), 1, "packet should be returned");
     }
 }

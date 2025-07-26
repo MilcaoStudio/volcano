@@ -356,7 +356,9 @@ pub struct DownTrack {
     /// ```
     pub temporal_layer: AtomicU32,
 
+    /// Offset from last packet's SN
     sn_offset: Mutex<u16>,
+    /// Offset from last packet's timestamp
     ts_offset: Mutex<u32>,
 
     last_sn: Mutex<u16>,
