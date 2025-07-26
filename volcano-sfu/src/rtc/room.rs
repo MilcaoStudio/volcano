@@ -516,7 +516,7 @@ impl Room {
         info!("Track {id} has been removed");
         self.tracks.remove(id);
 
-        // TODO: stop the RTP sender thread and drop
+        // Router stops when peers are closed
     }
 
     /// Send a serializable message to all peers' subscribers
