@@ -159,6 +159,9 @@ pub struct Buffer {
     /// The latest timestamp received on a packet.
     /// The timestamp reflects the sampling instant of the first octet in the RTP data packet.
     latest_timestamp: u32,
+    /// The latest timestamp received on a packet marked as head.
+    /// When there is no head, you should mark as head the first frame incoming every second.
+    latest_head_timestamp: u32,
     /// Subsecond timestamp when the latest timestamp was received.
     latest_timestamp_nanos: u32,
 
@@ -178,6 +181,99 @@ impl Buffer {
             video_pool_len: 1500 * 500,
             audio_pool_len: 1500 * 25,
             ..Default::default()
+        }
+    }
+
+    /// # Responsabilities
+    /// - Update SN, max SN and last report
+    /// - Add missing sequence numbers to nack queue
+    /// - Remove old missing sequence numbers from nack queue
+    fn calculate_nack(&mut self, sn: u16, arrival_time: u32) {
+        let distance = bucket::distance(sn, self.max_seq_no);
+        if self.stats.packet_count == 0 {
+            self.base_sn = sn;
+            self.max_seq_no = sn;
+            self.last_report = arrival_time;
+        }
+        // new SN
+        else if distance & 0x8000 == 0 {
+            if sn < self.max_seq_no {
+                self.cycles += MAX_SEQUENCE_NUMBER;
+            }
+            if self.nack {
+                // Example: sn=1005, max_seq_no=1000
+                // diff = 5 (5 packets lost)
+                let diff = sn - self.max_seq_no;
+
+                for i in 1..diff {
+                    let msn = sn - i;
+
+                    let ext_sn = self.into_extended_sn(msn);
+
+                    if let Some(nacker) = self.nacker.as_mut() {
+                        nacker.push(ext_sn);
+                    }
+                }
+            }
+            self.max_seq_no = sn;
+        }
+        // High distance, sequence number should be removed
+        else if self.nack && (distance & 0x8000 > 0) {
+            let ext_sn = self.into_extended_sn(sn);
+            if let Some(nacker) = self.nacker.as_mut() {
+                nacker.remove(ext_sn);
+            }
+        }
+    }
+
+    /// Converts a 16-bit sequence number into 32-bit extended sequence number,
+    /// based on actual cycle count and last sequence number got.
+    fn into_extended_sn(&self, sn: u16) -> u32 {
+        if sn > self.max_seq_no && (sn & 0x8000) > 0 && self.max_seq_no & 0x8000 == 0 {
+            // Example: cycles (65536) - 65536 = 0, 0 | sn (32768) = 32768
+            (self.cycles - MAX_SEQUENCE_NUMBER) | sn as u32
+        } else {
+            // Example: cycles (65536) | sn (1001) = 66537
+            self.cycles | sn as u32
+        }
+    }
+
+    /// Build RTCP feedback packets (NACK and PLI) based on detected loss.
+    /// 
+    /// # Returns 
+    /// - RTCP packets vector ready to be sent (may be empty)
+    async fn build_feedback_packets(&mut self) -> Vec<Box<dyn RtcpPacket + Send + Sync>> {
+        match self.nacker.as_mut() {
+            Some(nacker) => {
+                let seq_number = self.cycles | self.max_seq_no as u32;
+                let (nacks, ask_key_frame) = nacker.pairs(seq_number);
+
+                let mut pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> = Vec::default();
+        
+                // Add NACKs
+                if let Some(nacks) = nacks {
+                    if !nacks.is_empty() {
+                        let pkt = TransportLayerNack {
+                            media_ssrc: self.media_ssrc,
+                            nacks: nacks,
+                            ..Default::default()
+                        };
+                        pkts.push(Box::new(pkt));
+                    }
+                };
+
+                // Add PLI
+                if ask_key_frame {
+                    let pkt = PictureLossIndication {
+                        media_ssrc: self.media_ssrc,
+                        ..Default::default()
+                    };
+                    pkts.push(Box::new(pkt));
+                }
+
+                pkts
+            },
+            None => Vec::default(),
         }
     }
 
@@ -336,46 +432,6 @@ impl AtomicBuffer {
         self.buffer.lock().await.bitrate
     }
 
-    /// Returns an empty vector when there is no nacker available.
-    async fn build_nack_packet(
-        &self,
-        buffer: &mut Buffer,
-    ) -> Vec<Box<dyn RtcpPacket + Send + Sync>> {
-        let mut pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> = Vec::new();
-
-        if buffer.nacker.is_none() {
-            return pkts;
-        }
-        let seq_number = buffer.cycles | buffer.max_seq_no as u32;
-        let (nacks, ask_key_frame) = buffer.nacker.as_mut().unwrap().pairs(seq_number);
-
-        let mut nacks_len: usize = 0;
-        if nacks.is_some() {
-            nacks_len = nacks.as_ref().unwrap().len();
-        }
-
-        if nacks_len > 0 || ask_key_frame {
-            if nacks_len > 0 {
-                let pkt = TransportLayerNack {
-                    media_ssrc: buffer.media_ssrc,
-                    nacks: nacks.unwrap(),
-                    ..Default::default()
-                };
-                pkts.push(Box::new(pkt));
-            }
-
-            if ask_key_frame {
-                let pkt = PictureLossIndication {
-                    media_ssrc: buffer.media_ssrc,
-                    ..Default::default()
-                };
-                pkts.push(Box::new(pkt));
-            }
-        }
-
-        pkts
-    }
-
     /// Updates the buffer with the given packet and its arrival time.
     /// The packet is added to the bucket. An [ExtPacket] is created and inserted into the packet queue.
     /// # Responsabilites
@@ -388,48 +444,7 @@ impl AtomicBuffer {
     pub async fn calc(&self, packet: Packet, arrival_time: u32) {
         let mut buffer = self.buffer.lock().await;
         let sn = packet.header.sequence_number;
-        let distance = bucket::distance(sn, buffer.max_seq_no);
-
-        if buffer.stats.packet_count == 0 {
-            buffer.base_sn = sn;
-            buffer.max_seq_no = sn;
-            buffer.last_report = arrival_time;
-        } else if distance & 0x8000 == 0 {
-            if sn < buffer.max_seq_no {
-                buffer.cycles += MAX_SEQUENCE_NUMBER;
-            }
-            if buffer.nack {
-                let diff = sn - buffer.max_seq_no;
-
-                for i in 1..diff {
-                    let msn = sn - i;
-
-                    let ext_sn: u32 = if msn > buffer.max_seq_no
-                        && (msn & 0x8000) > 0
-                        && buffer.max_seq_no & 0x8000 == 0
-                    {
-                        (buffer.cycles - MAX_SEQUENCE_NUMBER) | msn as u32
-                    } else {
-                        buffer.cycles | msn as u32
-                    };
-
-                    if let Some(nacker) = buffer.nacker.as_mut() {
-                        nacker.push(ext_sn);
-                    }
-                }
-            }
-            buffer.max_seq_no = sn;
-        } else if buffer.nack && (distance & 0x8000 > 0) {
-            let ext_sn: u32 =
-                if sn > buffer.max_seq_no && (sn & 0x8000) > 0 && buffer.max_seq_no & 0x8000 == 0 {
-                    (buffer.cycles - MAX_SEQUENCE_NUMBER) | sn as u32
-                } else {
-                    buffer.cycles | sn as u32
-                };
-            if let Some(nacker) = buffer.nacker.as_mut() {
-                nacker.remove(ext_sn);
-            }
-        }
+        buffer.calculate_nack(sn, arrival_time);
 
         let pkt = &packet.payload;
         let max_seq_no = buffer.max_seq_no;
@@ -439,12 +454,12 @@ impl AtomicBuffer {
             }
         }
 
-        buffer.stats.total_byte += pkt.len() as u64;
-        buffer.bitrate_helper += pkt.len() as u64;
-        buffer.stats.packet_count += 1;
+        // Better safe (wrapping) than sorry (overflow)
+        buffer.stats.total_byte = buffer.stats.total_byte.wrapping_add(pkt.len() as u64);
+        buffer.bitrate_helper = buffer.bitrate_helper.wrapping_add(pkt.len() as u64);
+        buffer.stats.packet_count = buffer.stats.packet_count.wrapping_add(1);
 
         let mut ep = ExtPacket {
-            head: sn == buffer.max_seq_no,
             cycle: buffer.cycles,
             packet: packet.clone(),
             arrival: arrival_time,
@@ -452,12 +467,32 @@ impl AtomicBuffer {
             ..Default::default()
         };
 
+        match buffer.codec_type {
+            RTPCodecType::Audio => {
+                let mut head = packet.header.marker;
+                let pkt_ts = packet.header.timestamp;
+                // Set initial timestamp for first packet
+                if buffer.stats.packet_count == 1 {
+                    head = true;
+                    buffer.latest_head_timestamp = pkt_ts;
+                }
+                if buffer.latest_head_timestamp.wrapping_add(buffer.clock_rate) < pkt_ts {
+                    buffer.latest_head_timestamp = pkt_ts;
+                    head = true;
+                }
+                ep.head = head;
+            }
+            _ => {
+                // TODO: Head for video codecs (if not implemented)
+            }
+        }
+
         match buffer.mime.as_str() {
             "video/vp8" => {
                 let mut vp8_packet = VP8::default();
                 if let Err(e) = vp8_packet.unmarshal(&packet.payload[..]) {
                     match e {
-                        BufferError::ErrNilPacket => {},
+                        BufferError::ErrNilPacket => {}
                         _ => warn!("Error parsing VP8 packet: {e}"),
                     }
                 }
@@ -536,7 +571,7 @@ impl AtomicBuffer {
         let diff = arrival_time.saturating_sub(buffer.last_report);
 
         if buffer.nacker.is_some() {
-            let rv = self.build_nack_packet(&mut buffer).await;
+            let rv = buffer.build_feedback_packets().await;
             let mut handler = buffer.on_feedback_callback_handler.lock().await;
             if let Some(f) = &mut *handler {
                 f(rv).await;
