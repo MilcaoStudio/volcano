@@ -182,16 +182,15 @@ impl LocalRouter {
             )
             .await?;
         // New local track
-        info!("LocalRouter::add_down_track Creating new local track");
         let mut down_track = DownTrack::new_track_local(subscriber.id.clone(), down_track_local);
         down_track.set_transceiver(transceiver.clone());
         let down_track_arc = Arc::new(down_track);
-
+        
         let s_out = subscriber.clone();
         let r_out = receiver.clone();
         let down_track_out = down_track_arc.clone();
         down_track_arc
-            .register_on_close(Box::new(move || {
+        .register_on_close(Box::new(move || {
                 let s_in = s_out.clone();
                 let r_in = r_out.clone();
                 let transceiver_in = transceiver.clone();
@@ -205,7 +204,8 @@ impl LocalRouter {
                                 info!("Remove DownTrack for {}", &r_in.stream_id());
                                 s_in.remove_down_track(&r_in.stream_id(), &down_track_in)
                                     .await;
-                                info!("RemoveDownTrack Negotiate");
+
+                                // Force negotiation
                                 if let Err(err) = s_in.negotiate(None).await {
                                     error!("negotiate err:{} ", err);
                                 }
@@ -218,22 +218,24 @@ impl LocalRouter {
                 })
             }))
             .await;
-
+        
         let s_out_1 = subscriber.clone();
         let r_out_1 = receiver.clone();
         down_track_arc
-            .register_on_bind(Box::new(move || {
-                let s_in = s_out_1.clone();
-                let r_in = r_out_1.clone();
-
-                Box::pin(async move {
-                    tokio::spawn(async move {
-                        s_in.send_stream_down_track_reports(&r_in.stream_id()).await;
-                    });
-                })
-            }))
-            .await;
-
+        .register_on_bind(Box::new(move || {
+            let s_in = s_out_1.clone();
+            let r_in = r_out_1.clone();
+            
+            Box::pin(async move {
+                tokio::spawn(async move {
+                    s_in.send_stream_down_track_reports(&r_in.stream_id()).await;
+                });
+            })
+        }))
+        .await;
+    
+        info!("[Router {}] Local track {} created", self.id, down_track_arc.id());
+        
         subscriber
             .add_down_track(receiver.stream_id(), down_track_arc.clone())
             .await;
@@ -319,11 +321,6 @@ impl LocalRouter {
     ) -> (Arc<WebRTCReceiver>, bool) {
         let track_id = track.id();
         let stream_id = track.stream_id();
-        info!(
-            "add_receiver -> track {}, stream: {}",
-            track_id,
-            stream_id
-        );
         let mut published = false;
         let buffer = self.buffer_factory.get_or_new_buffer(track.ssrc()).await;
         let sender = self.rtcp_sender_channel.clone();
@@ -464,7 +461,7 @@ impl LocalRouter {
                 self.config.simulcast.best_quality_first,
             )
             .await;
-
+        
         if let Some(layer_val) = layer {
             let receiver_clone = arc_receiver.clone();
             tokio::spawn(async move { receiver_clone.write_rtp(layer_val).await });

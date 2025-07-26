@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
@@ -159,7 +159,7 @@ pub trait Receiver: Send + Sync {
     /// Converts the receiver into a `dyn Any` object for dynamic downcasting.
     fn as_any(&self) -> &(dyn Any + Send + Sync);
 
-    /// Awaits for incoming packets from a given layer and writes RTP packets.
+    /// Awaits for incoming packets from a given layer and forwards them.
     /// 
     /// ## Blocking
     /// It is recommended to use this function inside an async task.
@@ -328,7 +328,7 @@ impl Receiver for WebRTCReceiver {
                     continue;
                 }
                 for d in &mut *down_tracks_val {
-                    if let Err(err) = d.switch_spatial_layer(target_layer as i32, false).await {
+                    if let Err(err) = d.switch_spatial_layer(target_layer as u8, false).await {
                         error!("switch_spatial_layer err: {}", err);
                     }
                 }
@@ -343,7 +343,7 @@ impl Receiver for WebRTCReceiver {
                     continue;
                 }
                 for d in &mut *dts {
-                    if let Err(err) = d.switch_spatial_layer(target_layer as i32, false).await {
+                    if let Err(err) = d.switch_spatial_layer(target_layer as u8, false).await {
                         error!("switch_spatial_layer err: {}", err);
                     }
                 }
@@ -378,7 +378,7 @@ impl Receiver for WebRTCReceiver {
                 debug!("Track {} already subscribed", track_id);
                 return Err(Error::DuplicatedTrack(layer));
             }
-            track.set_initial_layers(layer as i32, 2);
+            track.set_initial_layers(layer as u8, 2);
             track.set_max_spatial_layer(2);
             track.set_max_temporal_layer(2);
             track.set_last_ssrc(self.ssrc(layer).await);
@@ -570,8 +570,11 @@ impl Receiver for WebRTCReceiver {
     }
 
     async fn write_rtp(&self, layer: usize) -> Result<()> {
+        info!("[Receiver {}] Write ExtPacket for layer {layer} started.", self.track_id);
+        let mut interval = tokio::time::interval(Duration::from_micros(125));
         loop {
             if let Some(buffer) = &self.buffers.lock().await[layer] {
+                interval.tick().await;
                 match buffer.read_extended().await {
                     Ok(pkt) => {
                         if self.is_simulcast && self.pending[layer].load(Ordering::Relaxed) {
@@ -593,7 +596,7 @@ impl Receiver for WebRTCReceiver {
                                     };
                                     // Store downtrack in current layer
                                     self.store_down_track(layer, dt.clone()).await;
-                                    dt.switch_spatial_layer_forced(layer as i32);
+                                    dt.switch_spatial_layer_forced(layer as u8);
                                 }
                                 // Cleanup
                                 self.pending_tracks[layer].lock().await.clear();
@@ -619,9 +622,9 @@ impl Receiver for WebRTCReceiver {
                         let mut delete_down_track_params = Vec::new();
                         {
                             let dts = self.down_tracks[layer].lock().await;
-
+                            
                             for dt in &*dts {
-                                if let Err(Error::ErrWebRTC(e)) = dt.write_rtp(pkt.clone(), layer).await
+                                if let Err(Error::ErrWebRTC(e)) = dt.forward_rtp(pkt.clone(), layer).await
                                 {
                                     match e {
                                         RTCError::ErrClosedPipe

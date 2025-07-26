@@ -39,7 +39,7 @@ pub enum Error {
     #[error("track is already added in layer #{0}")]
     DuplicatedTrack(usize),
     #[error("spatial layer #{0} is currently full")]
-    FullSpatialLayer(i32),
+    FullSpatialLayer(u8),
     // #[error("webrtc error error")]
     // ErrWebRTCError(WebRTCErrorError),
 }

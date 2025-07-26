@@ -75,7 +75,7 @@ pub struct RouterConfig {
     #[serde(rename = "maxbandwidth")]
     pub max_bandwidth: u64,
     #[serde(rename = "maxpackettrack")]
-    pub max_packet_track: i32,
+    pub max_packet_track: u32,
     #[serde(rename = "audiolevelinterval")]
     pub audio_level_interval: i32,
     #[serde(rename = "audiolevelthreshold")]

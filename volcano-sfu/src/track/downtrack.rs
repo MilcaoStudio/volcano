@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use bytes::Bytes;
-use webrtc::rtp::sequence::Sequencer;
 use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
@@ -834,7 +833,7 @@ impl DownTrack {
                 .simple_packets_sent_per_second
                 .swap(0, Ordering::SeqCst);
             trace!(
-                "[Track {}] Sending {count} simple packets (VP8) per second",
+                "[Track {}] Sending {count} simple RTP packets per second",
                 self.id()
             );
             *last_second = Instant::now();

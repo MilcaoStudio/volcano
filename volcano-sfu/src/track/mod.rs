@@ -26,16 +26,17 @@ pub async fn set_vp8_temporal_layer(
     d: &DownTrack,
 ) -> (Bytes, u16, u8, bool) {
     let pkt = ext_packet.payload;
-    let layer = d.temporal_layer.load(Ordering::Relaxed);
+    let layer = d.temporal_layer.load(Ordering::Acquire);
 
     let current_layer = layer as u16;
-    let current_target_layer = (layer >> 16) as u16;
-
-    if current_target_layer != current_layer {
-        if pkt.tid <= current_target_layer as u8 {
+    let target_layer = (layer >> 16) as u16;
+    
+    if target_layer != current_layer {
+        if pkt.tid <= target_layer as u8 {
+            let temporal_layer = (target_layer as u32) << 16 | target_layer as u32;
             d.temporal_layer.store(
-                ((current_target_layer as i32) << 16) | current_target_layer as i32,
-                Ordering::Relaxed,
+                temporal_layer,
+                Ordering::Release,
             )
         }
     } else if pkt.tid > current_layer as u8 {

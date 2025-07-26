@@ -108,7 +108,7 @@ impl AtomicSequencer {
             sequencer.head_sn = off_sn;
         }
 
-        let cur_step = sequencer.step % sequencer.seq.len() as u32;
+        let cur_step = sequencer.step % sequencer.max;
         sequencer.seq.insert(
             cur_step,
             PacketMeta {
