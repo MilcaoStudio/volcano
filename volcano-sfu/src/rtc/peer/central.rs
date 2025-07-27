@@ -412,6 +412,7 @@ impl Peer for CentralPeer {
             router: self.config.router.clone(),
             factory: Arc::default(),
             version: self.config.version.clone(),
+            mux_port: self.config.mux_port.clone(),
         };
         let router = Arc::new(LocalRouter::new(
             self.id.clone(),

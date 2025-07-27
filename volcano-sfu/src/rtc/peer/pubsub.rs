@@ -117,6 +117,7 @@ impl PubSubPeer {
             router: self.config.router.clone(),
             factory: Arc::default(),
             version: self.config.version.clone(),
+            mux_port: self.config.mux_port,
         };
 
         if !cfg.no_publish {

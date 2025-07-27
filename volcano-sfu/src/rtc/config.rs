@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::{net::UdpSocket, sync::Mutex};
-use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}};
+use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}};
 use anyhow::Result;
 
 use crate::{buffer::AtomicFactory};
@@ -37,7 +37,9 @@ pub struct WebRTCTransportConfig {
     pub setting: SettingEngine,
     pub router: RouterConfig,
     pub factory: Arc<Mutex<AtomicFactory>>,
+    pub mux_port: Option<u16>,
 }
+
 #[derive(Clone, Default, Deserialize)]
 struct WebRTCTimeoutsConfig {
     #[serde(rename = "disconnected")]
@@ -49,7 +51,7 @@ struct WebRTCTimeoutsConfig {
 }
 #[derive(Clone, Default, Deserialize)]
 pub struct WebRTCConfig {
-    ice_single_port: Option<i32>,
+    ice_single_port: Option<u16>,
     #[serde(rename = "portrange")]
     pub ice_port_range: Option<Vec<u16>>,
     #[serde(rename = "iceservers")]
@@ -110,54 +112,25 @@ impl Config {
     }
 }
 
-
-
 impl WebRTCTransportConfig {
-    pub async fn new(c: &Config) -> Result<Self> {
+
+    /// Creates the initial configuration for running RTC peer connections
+    /// # Recommendations
+    /// - Use `webrtc.ice_single_port` for internal RTCP packets handling. `webrtc.ice_port_range` is harder to handle.
+    /// - Use [Self::bind] to start the UDP socket. 
+    pub fn new(c: &Config) -> Self {
         let mut se = SettingEngine::default();
         se.disable_media_engine_copy(true);
 
-        if let Some(ice_single_port) = c.webrtc.ice_single_port {
-            info!("Binding UDP socket to 0.0.0.0:{ice_single_port}");
-            let rv = UdpSocket::bind(("0.0.0.0", ice_single_port as u16)).await;
-            let udp_socket: UdpSocket = match rv {
-                Ok(sock) => sock,
-                Err(_) => {
-                    std::process::exit(0);
-                }
-            };
-            let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(udp_socket));
-            se.set_udp_network(UDPNetwork::Muxed(udp_mux));
-        } else {
-            let mut ice_port_start: u16 = 0;
-            let mut ice_port_end: u16 = 0;
+        let mux_port = c.webrtc.ice_single_port;
 
-            #[cfg(not(feature = "turn"))]
-            if c.turn.enabled {
-                error!("`turn` feature is not enabled for this crate. Turn server will not be started.");
-            }
-
-            #[cfg(feature = "turn")]
-            if c.turn.enabled && c.turn.port_range.is_none() {
-                ice_port_start = ICE_MIN_PORT;
-                ice_port_end = ICE_MAX_PORT;
-            }
-            
-            if let Some(ice_port_range) = &c.webrtc.ice_port_range {
-                if ice_port_range.len() == 2 {
-                    ice_port_start = ice_port_range[0];
-                    ice_port_end = ice_port_range[1];
-                }
-            }
-
-            if ice_port_start != 0 || ice_port_end != 0 {
-                info!("Creating UDP network on port range from {ice_port_start} to {ice_port_end}");
-                let ephemeral_udp =
-                    UDPNetwork::Ephemeral(EphemeralUDP::new(ice_port_start, ice_port_end).unwrap());
-                se.set_udp_network(ephemeral_udp);
-            }
+        if c.webrtc.ice_port_range.is_some() {
+            warn!("Epehemeral network is deprecated and will be not be handled by this crate.");
         }
 
+        if c.turn.enabled {
+            error!("`turn` feature is not enabled for this crate. Turn server will not be started.");
+        }
         
         let mut ice_servers: Vec<RTCIceServer> = Vec::default();
         let ice_lite = c.webrtc.candidates.ice_lite.unwrap_or_default();
@@ -207,7 +180,17 @@ impl WebRTCTransportConfig {
             );
         }
 
-        let mut w = WebRTCTransportConfig {
+        if let Some(nat1toiips) = &c.webrtc.candidates.nat1_to_1ips {
+            if !nat1toiips.is_empty() {
+                se.set_nat_1to1_ips(nat1toiips.clone(), RTCIceCandidateType::Host);
+            }
+        }
+        
+        if c.webrtc.mdns {
+            se.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+        }
+
+        WebRTCTransportConfig {
             configuration: RTCConfiguration {
                 ice_servers,
                 ..Default::default()
@@ -216,20 +199,22 @@ impl WebRTCTransportConfig {
             router: c.router.clone(),
             factory: Arc::default(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-        };
+            mux_port,
+        }
+    }
 
-        if let Some(nat1toiips) = &c.webrtc.candidates.nat1_to_1ips {
-            if !nat1toiips.is_empty() {
-                w.setting
-                    .set_nat_1to1_ips(nat1toiips.clone(), RTCIceCandidateType::Host);
-            }
+    /// Binds the UDP network to receive data.
+    pub async fn bind(&mut self) -> Result<()> {
+
+        let se = &mut self.setting;
+
+        if let Some(ice_single_port) = self.mux_port {
+            info!("Binding UDP socket to 0.0.0.0:{ice_single_port}");
+            let udp_socket = UdpSocket::bind(("0.0.0.0", ice_single_port)).await?;
+            let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(udp_socket));
+            se.set_udp_network(UDPNetwork::Muxed(udp_mux));
         }
 
-        if c.webrtc.mdns {
-            w.setting
-                .set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
-        }
-        
-        Ok(w)
+        Ok(())
     }
 }

@@ -47,7 +47,7 @@ pub async fn launch<A: ToSocketAddrs>(addr: A, config: Config, auth: AuthFn) -> 
     //if c.turn.enabled {
     //    turn::init_turn_server(c.turn, c.turn_auth).await?;
     //}
-    let webrtc_config = Arc::new(WebRTCTransportConfig::new(&config).await?);
+    let webrtc_config = Arc::new(WebRTCTransportConfig::new(&config));
     info!("WebRTC configuration for SFU v{} loaded!", webrtc_config.version);
     // Accept new connections
     let auth = Arc::new(auth);

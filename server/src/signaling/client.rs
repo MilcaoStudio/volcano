@@ -71,11 +71,10 @@ impl Client {
         let ws_worker = async {
             // Read incoming messages
             while let Some(msg) = read.try_next().await? {
-                debug!("[Incoming] Message received.");
 
                 match PacketC2S::from(&msg) {
                     Ok(packet) => {
-                        info!("[Incoming] C->S: {:?}", packet);
+                        debug!("[Incoming] C->S: {:?}", packet);
                         let result = self.handle_message(packet, &write).await;
                         match result {
                             Ok(_) => debug!("[Incoming] Done!"),
@@ -91,7 +90,6 @@ impl Client {
                                 .await?
                         }
                         ServerError::UnproccesableEntity => {
-                            debug!("[Incoming] Message is not text.");
                             debug!(
                                 "msg -> {}",
                                 msg.into_text().unwrap_or_else(|e| e.to_string())
@@ -279,7 +277,7 @@ impl Client {
 
         // Set up subscriber... on join?
         if !cfg.no_subscribe {
-            info!("[Client {}] Set up subscriber", id);
+            info!("[{}] Set up subscriber", self.user.id);
             peer.setup_subscriber(&cfg).await?;
 
             if !cfg.no_publish {
