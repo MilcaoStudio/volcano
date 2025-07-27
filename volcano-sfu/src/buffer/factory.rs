@@ -24,7 +24,7 @@ impl AtomicFactory {
         let mut factory = self.factory.lock().await;
         let entry = factory.rtcp_readers.entry(ssrc);
         entry.or_insert(Arc::new(
-            RTCPReader::new(ssrc)
+            RTCPReader::new()
         )).clone()
     }
 

@@ -9,12 +9,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 use webrtc::error::Error as RTCError;
 use webrtc::error::Result as RTCResult;
-use webrtc::rtcp;
-use webrtc::rtcp::packet::Packet as RtcpPacket;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-use webrtc::rtcp::source_description::SdesType;
 use webrtc::rtcp::source_description::SourceDescriptionChunk;
-use webrtc::rtcp::source_description::SourceDescriptionItem;
 use webrtc::rtp;
 use webrtc::rtp_transceiver::RTCRtpTransceiver;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
@@ -23,7 +19,6 @@ use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_local::TrackLocalContext;
 use webrtc::track::track_local::TrackLocalWriter;
-//use std::sync::Once;
 use tokio::sync::Mutex;
 
 use crate::buffer::AtomicFactory;
@@ -34,7 +29,6 @@ use super::codec_parameters_fuzzy_search;
 use super::error::{Error, Result};
 use super::receiver::Receiver;
 use super::sequencer::AtomicSequencer;
-use super::sequencer::PacketMeta;
 use super::set_vp8_temporal_layer;
 use super::simulcast::SimulcastTrackHelpers;
 
@@ -122,114 +116,6 @@ impl DownTrackInternal {
         let mut handler = self.on_bind_handler.lock().await;
         *handler = Some(f);
     }
-
-    async fn handle_rtcp(
-        enabled: bool,
-        data: Vec<u8>,
-        last_ssrc: u32,
-        ssrc: u32,
-        sequencer: Arc<Mutex<AtomicSequencer>>,
-        receiver: Arc<dyn Receiver>,
-    ) {
-        if !enabled {
-            return;
-        }
-
-        let mut buf = &data[..];
-
-        let pkts_result = rtcp::packet::unmarshal(&mut buf);
-        let mut pkts;
-
-        match pkts_result {
-            Ok(pkts_rv) => {
-                pkts = pkts_rv;
-            }
-            Err(_) => {
-                return;
-            }
-        }
-
-        let mut fwd_pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> = Vec::new();
-        let mut pli_once = true;
-        let mut fir_once = true;
-
-        let mut max_rate_packet_loss: u8 = 0;
-        let mut expected_min_bitrate: u64 = 0;
-
-        if last_ssrc == 0 {
-            return;
-        }
-
-        for pkt in &mut pkts {
-            if let Some(pic_loss_indication) = pkt
-                    .as_any()
-                    .downcast_ref::<rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()
-                {
-                    if pli_once {
-                        let mut pli = pic_loss_indication.clone();
-                        pli.media_ssrc = last_ssrc;
-                        pli.sender_ssrc = ssrc;
-
-                        fwd_pkts.push(Box::new(pli));
-                        pli_once = false;
-                    }
-                }
-            else if let Some(full_intra_request) = pkt
-                    .as_any()
-                    .downcast_ref::<rtcp::payload_feedbacks::full_intra_request::FullIntraRequest>()
-            {
-                if fir_once{
-                    let mut fir = full_intra_request.clone();
-                    fir.media_ssrc = last_ssrc;
-                    fir.sender_ssrc = ssrc;
-
-                    fwd_pkts.push(Box::new(fir));
-                    fir_once = false;
-                }
-            }
-            else if let Some(receiver_estimated_max_bitrate) = pkt
-                    .as_any()
-                    .downcast_ref::<rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate>()
-                    {
-                if expected_min_bitrate == 0 || expected_min_bitrate > receiver_estimated_max_bitrate.bitrate as u64{
-                    expected_min_bitrate = receiver_estimated_max_bitrate.bitrate as u64;
-
-                }
-            }
-            else if let Some(receiver_report) = pkt.as_any().downcast_ref::<rtcp::receiver_report::ReceiverReport>(){
-
-                for r in &receiver_report.reports{
-                    if max_rate_packet_loss == 0 || max_rate_packet_loss < r.fraction_lost{
-                        max_rate_packet_loss = r.fraction_lost;
-                    }
-
-                }
-
-            }
-            else if let Some(transport_layer_nack) = pkt.as_any().downcast_ref::<rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack>()
-            {
-                let mut nacked_packets:Vec<PacketMeta> = Vec::new();
-                for pair in &transport_layer_nack.nacks {
-                    let seq_numbers = pair.packet_list();
-                    let sequencer2 = sequencer.lock().await;
-                    let mut pairs= sequencer2.get_seq_no_pairs(&seq_numbers[..]).await;
-                    nacked_packets.append(&mut pairs);
-                }
-
-                warn!("Packet retransmition disabled. Could not retransmit {} packets.", nacked_packets.len());
-             //   receiver.retransmit_packets(track, packets)
-
-            }
-        }
-
-        if !fwd_pkts.is_empty() {
-            if let Err(err) = receiver.send_rtcp(fwd_pkts).await {
-                log::error!("send_rtcp err:{}", err);
-            }
-        }
-
-        // Ok(())
-    }
 }
 
 impl PartialEq for DownTrackInternal {
@@ -269,15 +155,15 @@ impl TrackLocal for DownTrackInternal {
         let sequencer = self.sequencer.clone();
         let receiver = self.receiver.clone();
 
-        rtcp.register_on_packet(Box::new(move |data: Vec<u8>| {
+        rtcp.set_on_packets(Box::new(move |pkts| {
             let sequencer2 = sequencer.clone();
             let receiver2 = receiver.clone();
             Box::pin(async move {
-                DownTrackInternal::handle_rtcp(
-                    enabled, data, last_ssrc, ssrc_val, sequencer2, receiver2,
-                )
-                .await;
-                Ok(())
+                if enabled {
+                    receiver2.handle_rtcp(pkts, last_ssrc, ssrc_val, sequencer2).await;
+                } else {
+                    trace!("[Track {}] Cannot send RTCP because track is muted.", receiver2.track_id())
+                }
             })
         }))
         .await;
@@ -431,6 +317,8 @@ impl DownTrack {
     /// # Returns
     /// A vector of source description chunks, or None if the track is not bound.
     pub async fn create_source_description_chunks(&self) -> Option<Vec<SourceDescriptionChunk>> {
+        use webrtc::rtcp::source_description::{SourceDescriptionItem, SdesType::SdesCname};
+
         if !self.bound() {
             return None;
         }
@@ -442,14 +330,14 @@ impl DownTrack {
             SourceDescriptionChunk {
                 source: ssrc,
                 items: vec![SourceDescriptionItem {
-                    sdes_type: SdesType::SdesCname,
+                    sdes_type: SdesCname,
                     text: Bytes::copy_from_slice(self.down_track_local.stream_id.as_bytes()),
                 }],
             },
             SourceDescriptionChunk {
                 source: ssrc,
                 items: vec![SourceDescriptionItem {
-                    sdes_type: SdesType::SdesCname,
+                    sdes_type: SdesCname,
                     text: Bytes::copy_from_slice(mid.as_bytes()),
                 }],
             },
