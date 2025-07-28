@@ -230,7 +230,7 @@ pub struct WebRTCReceiver {
 
 impl WebRTCReceiver {
 
-    pub async fn new(receiver: Arc<RTCRtpReceiver>, track: Arc<TrackRemote>, pid: String) -> Self {
+    pub fn new(receiver: Arc<RTCRtpReceiver>, track: Arc<TrackRemote>, pid: String) -> Self {
         let (s, _) = tokio::sync::mpsc::channel(1024);
         Self {
             peer_id: pid,
@@ -256,7 +256,7 @@ impl WebRTCReceiver {
         }
     }
 
-    pub(super) async fn is_recent_pli(&self) -> bool {
+    pub(super) fn is_recent_pli(&self) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -706,7 +706,7 @@ impl Receiver for WebRTCReceiver {
                                 self.pending_tracks[layer].lock().await.clear();
                                 self.pending[layer].store(false, Ordering::Relaxed);
                             } else {
-                                if !self.is_recent_pli().await {
+                                if !self.is_recent_pli() {
                                     let sender_ssrc = rand::random::<u32>();
                                     let media_ssrc = self.ssrc(layer).await;
                                     

@@ -630,7 +630,7 @@ impl DownTrack {
                 RTPCodecType::Video => {
                     if !ext_packet.key_frame {
                         let receiver = &self.down_track_local.receiver;
-                        if !receiver.is_recent_pli().await {
+                        if !receiver.is_recent_pli() {
                             let media_ssrc = ext_packet.packet.header.ssrc;
                             debug!("send PLI, ssrc:{}, media_ssrc:{}", ssrc, media_ssrc);
                             receiver
