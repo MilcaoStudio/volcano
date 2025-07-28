@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures::{Future, StreamExt};
 use std::{pin::Pin, sync::Arc};
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use tokio::net::{TcpListener, TcpStream};
 use volcano_sfu::rtc::{
         config::{Config, WebRTCTransportConfig}
     };
@@ -37,12 +37,12 @@ type AuthFn = Box<
 >;
 
 /// Launch a new signaling server
-pub async fn launch<A: ToSocketAddrs>(addr: A, config: Config, auth: AuthFn) -> Result<()> {
+pub async fn launch(addr: &str, config: Config, auth: AuthFn) -> Result<()> {
     // Create TCP listener
     let try_socket = TcpListener::bind(addr).await;
-    let listener = try_socket.expect("Failed to bind");
+    let listener = try_socket.expect(&format!("Failed to bind {}", addr));
 
-    info!("Server listening on {}", listener.local_addr().unwrap());
+    info!("Server listening on {}", listener.local_addr().expect("Server listening on <unknown ip>"));
     
     //if c.turn.enabled {
     //    turn::init_turn_server(c.turn, c.turn_auth).await?;
