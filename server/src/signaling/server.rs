@@ -2,9 +2,7 @@ use anyhow::Result;
 use futures::{Future, StreamExt};
 use std::{pin::Pin, sync::Arc};
 use tokio::net::{TcpListener, TcpStream};
-use volcano_sfu::rtc::{
-        config::{Config, WebRTCTransportConfig}
-    };
+use volcano_sfu::rtc::config::{Config, PortMap, WebRTCTransportConfig};
 
 use crate::reference::ReferenceDb;
 
@@ -37,7 +35,7 @@ type AuthFn = Box<
 >;
 
 /// Launch a new signaling server
-pub async fn launch(addr: &str, config: Config, auth: AuthFn) -> Result<()> {
+pub async fn launch_signaling(addr: &str, config: Config, auth: AuthFn) -> Result<()> {
     // Create TCP listener
     let try_socket = TcpListener::bind(addr).await;
     let listener = try_socket.expect(&format!("Failed to bind {}", addr));
@@ -47,8 +45,20 @@ pub async fn launch(addr: &str, config: Config, auth: AuthFn) -> Result<()> {
     //if c.turn.enabled {
     //    turn::init_turn_server(c.turn, c.turn_auth).await?;
     //}
-    let webrtc_config = Arc::new(WebRTCTransportConfig::new(&config));
+    
+    let mut webrtc_config = WebRTCTransportConfig::new(&config);
     info!("WebRTC configuration for SFU v{} loaded!", webrtc_config.version);
+    match webrtc_config.bind().await {
+        Ok(_) => {
+            match &webrtc_config.port_map {
+                PortMap::Single(port) =>
+                info!("UDP Mux network bound to port {port}"),
+                PortMap::Range(min, max) => info!("UDP Ephemeral network bound from {min} to {max} ports"),
+            }
+        },
+        Err(err) => error!("Bind failed: {err}"),
+    }
+    let config_arc = Arc::new(webrtc_config);
     // Accept new connections
     let auth = Arc::new(auth);
     // Create reference db
@@ -57,7 +67,7 @@ pub async fn launch(addr: &str, config: Config, auth: AuthFn) -> Result<()> {
         tokio::spawn(accept_connection(
             stream,
             auth.clone(),
-            Arc::clone(&webrtc_config),
+            Arc::clone(&config_arc),
             Arc::clone(&db),
         ));
     }

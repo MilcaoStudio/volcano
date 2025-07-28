@@ -8,7 +8,7 @@ extern crate log;
 #[macro_use]
 extern crate serde;
 
-pub mod signaling;
+mod signaling;
 mod logger;
 mod models;
 mod reference;
@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
   
-    signaling::server::launch("0.0.0.0:4000", config, Box::new(move |token| {
+    signaling::server::launch_signaling("0.0.0.0:4000", config, Box::new(move |token| {
         Box::pin(async move {
             use signaling::server::{UserCapabilities, UserInformation};
 

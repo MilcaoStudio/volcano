@@ -229,7 +229,6 @@ impl WebRTCTransportConfig {
 
         let network = match self.port_map {
             PortMap::Single(port) => {
-                info!("Binding UDP socket to 0.0.0.0:{port}");
                 let udp_socket = UdpSocket::bind(("0.0.0.0", port)).await?;
                 let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(udp_socket));
                 UDPNetwork::Muxed(udp_mux)
