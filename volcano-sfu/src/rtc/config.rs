@@ -66,7 +66,8 @@ struct WebRTCTimeoutsConfig {
 }
 #[derive(Clone, Default, Deserialize)]
 pub struct WebRTCConfig {
-    ice_single_port: Option<u16>,
+    #[serde(rename = "singleport")]
+    single_port: Option<u16>,
     #[serde(rename = "portrange")]
     pub ice_port_range: Option<Vec<u16>>,
     #[serde(rename = "iceservers")]
@@ -137,7 +138,7 @@ impl WebRTCTransportConfig {
         let mut se = SettingEngine::default();
         se.disable_media_engine_copy(true);
 
-        let port_map = if let Some(single_port) = c.webrtc.ice_single_port {
+        let port_map = if let Some(single_port) = c.webrtc.single_port {
             PortMap::Single(single_port)
         } else if let Some(ports) = &c.webrtc.ice_port_range {
             assert!(ports.len() > 1, "Expected at least 2 elements in webrtc.ice_port_range");
