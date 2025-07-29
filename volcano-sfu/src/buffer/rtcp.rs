@@ -3,9 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use webrtc::rtcp::packet::{Packet, unmarshal};
-use super::error::Result;
-
+use webrtc::rtcp::packet::Packet;
 pub type OnPacketBatchFn = Box<
     dyn (FnMut(Vec<Box<dyn Packet + Send + Sync>>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
         + Send
@@ -15,11 +13,11 @@ pub type OnPacketBatchFn = Box<
 pub type OnCloseFn = Box<dyn (FnMut() -> Pin<Box<dyn Future<Output = ()> + Send>>) + Send + Sync>;
 
 #[derive(Default)]
-pub struct RTCPReader {
+pub struct RTCPForwarder {
     on_packets_handler: Arc<Mutex<Option<OnPacketBatchFn>>>,
 }
 
-impl RTCPReader {
+impl RTCPForwarder {
     pub fn new() -> Self {
         Self {
             on_packets_handler: Arc::default(),
@@ -33,19 +31,12 @@ impl RTCPReader {
         *on_packets = Some(f);
     }
 
-    /// Unmarshal given raw data into RTCP packets. Every batch of packets calls `on_packet` handler.
-    /// # Returns
-    /// - `Ok(usize)` - Length of packets resulted from unmarshal
-    /// - `Err(rtcp::Error)` - Error trying to read the data.
-    pub async fn write(&self, data: &[u8]) -> Result<usize> {
-        // Use a mutable copy
-        let mut buf = &data[..];
-        let packets = unmarshal(&mut buf)?;
-        let len = packets.len();
+    pub async fn send_packets(&self, packets: Vec<Box<dyn Packet + Send + Sync>>) {
         let mut handler = self.on_packets_handler.lock().await;
         if let Some(f) = handler.as_mut() {
             f(packets).await;
+        } else {
+            trace!("No callback set. {} RTCP packets lost.", packets.len());
         }
-        Ok(len)
     }
 }

@@ -3,7 +3,7 @@ pub mod error;
 mod factory;
 pub use factory::*;
 pub mod nack;
-pub mod rtcp_reader;
+pub mod rtcp;
 
 pub use error::BufferError;
 use error::Result;

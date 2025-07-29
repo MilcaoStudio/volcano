@@ -1,5 +1,5 @@
 use super::AtomicBuffer;
-use super::rtcp_reader::RTCPReader;
+use super::rtcp::RTCPForwarder;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 #[derive(Default)]
 pub struct Factory {
     pub rtp_buffers: HashMap<u32, Arc<AtomicBuffer>>,
-    pub rtcp_readers: HashMap<u32, Arc<RTCPReader>>,
+    pub rtcp_readers: HashMap<u32, Arc<RTCPForwarder>>,
 }
 
 #[derive(Default)]
@@ -20,11 +20,11 @@ impl AtomicFactory {
         Self::default()
     }
 
-    pub async fn get_or_new_rtcp_buffer(&self, ssrc: u32) -> Arc<RTCPReader> {
+    pub async fn get_or_new_rtcp_buffer(&self, ssrc: u32) -> Arc<RTCPForwarder> {
         let mut factory = self.factory.lock().await;
         let entry = factory.rtcp_readers.entry(ssrc);
         entry.or_insert(Arc::new(
-            RTCPReader::new()
+            RTCPForwarder::new()
         )).clone()
     }
 
