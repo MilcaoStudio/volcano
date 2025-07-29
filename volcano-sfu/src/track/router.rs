@@ -8,9 +8,9 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::{Duration, sleep};
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::rtcp::header::PacketType;
 use webrtc::rtcp::packet::Packet as RtcpPacket;
 use webrtc::rtcp::sender_report::SenderReport;
-use webrtc::rtcp::source_description::SourceDescription;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
@@ -334,7 +334,7 @@ impl LocalRouter {
     /// - `published`: Whether the receiver was created or fetched.
     pub async fn add_receiver(
         self: &Arc<Self>,
-        receiver: Arc<RTCRtpReceiver>,
+        rtp_receiver: Arc<RTCRtpReceiver>,
         track: Arc<TrackRemote>,
         //track_id: String,
         //stream_id: String,
@@ -405,62 +405,62 @@ impl LocalRouter {
                 let buffer_in = Arc::clone(&buffer_out);
                 Box::pin(async move {
                     for pkt in pkts {
-                        if let Some(description) =
-                        pkt.as_any()
-                            .downcast_ref::<SourceDescription>()
-                    {
-                        // TODO: send stats
-                        info!("Packet SourceDescription: {}", description.to_string());
-                    }
-                    else if let Some(sender_report) =
-                        pkt.as_any()
-                            .downcast_ref::<SenderReport>()
-                    {
-                        info!("Packet SenderReport {}", sender_report.to_string());
-                        buffer_in
-                            .set_sender_report_data(
-                                sender_report.rtp_time,
-                                sender_report.ntp_time,
-                            )
-                            .await;
-                        if with_status {
-                            // TODO: update stats
+                        match pkt.header().packet_type {
+                            PacketType::SourceDescription => {
+                                // TODO: send stats
+                                info!("Packet SourceDescription received");
+                            }
+                            PacketType::SenderReport => {
+                                info!("Packet SenderReport");
+                                if let Some(sender_report) =
+                                    pkt.as_any().downcast_ref::<SenderReport>()
+                                {
+                                    buffer_in
+                                        .set_sender_report_data(
+                                            sender_report.rtp_time,
+                                            sender_report.ntp_time,
+                                        )
+                                        .await;
+                                    if with_status {
+                                        // TODO: update stats
+                                    }
+                                };
+                            }
+                            packet_type => {
+                                debug!("Unhandled packet type {}", packet_type);
+                            }
                         }
-                    }
                     }
                 })
             }))
             .await;
+
         let receivers = self.receivers.lock().await;
         let arc_receiver;
         match receivers.get(&track_id) {
             Some(r) => arc_receiver = r.clone(),
             None => {
-                let mut rv =
-                    WebRTCReceiver::new(receiver.clone(), track.clone(), self.id.clone()).await;
-                rv.set_rtcp_channel(self.rtcp_sender_channel.clone());
-                let recv_kind = rv.kind();
-                let stream_id = track.stream_id();
-                let router_out = self.clone();
-                rv.register_on_close(Box::new(move || {
-                    let router_in = router_out.clone();
-                    let stream_id_in = stream_id.clone();
-                    Box::pin(async move {
-                        if recv_kind == RTPCodecType::Audio {
-                            router_in
-                                .audio_observer
-                                .lock()
-                                .await
-                                .remove_stream(&stream_id_in)
-                                .await;
-                        }
-                    })
-                }))
-                .await;
-                arc_receiver = Arc::new(rv);
+                let rtc_rv = self
+                    .create_receiver(rtp_receiver.clone(), track.clone())
+                    .await;
+                arc_receiver = Arc::new(rtc_rv);
                 receivers.insert(track_id, arc_receiver.clone());
                 published = true;
                 info!("Track {} published", track.id());
+
+                info!(
+                    "[Publisher {}] Reading RTCP packets from {}",
+                    self.id,
+                    track.id()
+                );
+                let rtp_rv1 = rtp_receiver.clone();
+                tokio::spawn(async move {
+                    // Use mtu size (1460)
+                    while let Ok((pkts, _)) = rtp_rv1.read_rtcp().await {
+                        rtcp_reader.send_packets(pkts).await;
+                    }
+                });
+
                 if let Some(f) = &mut *self.on_add_receiver_track_handler.lock().await {
                     let _ = f(arc_receiver.clone()).await;
                 }
@@ -481,21 +481,49 @@ impl LocalRouter {
 
         buffer
             .bind(
-                receiver.get_parameters().await,
+                rtp_receiver.get_parameters().await,
                 BufferOptions {
                     max_bitrate: self.config.max_bandwidth,
                 },
             )
             .await;
         let buffer_clone = buffer.clone();
-        tokio::spawn(async move {
-            let mut b = vec![0u8; 1500];
 
-            while let Ok((pkt, _)) = track.read(&mut b).await {
+        info!(
+            "[Publisher {}] Reading RTP packets from {}",
+            self.id,
+            track.id()
+        );
+        tokio::spawn(async move {
+            // Use mtu size (1460)
+            while let Ok((pkt, _)) = track.read_rtp().await {
                 buffer_clone.write(pkt).await;
             }
         });
         (arc_receiver, published)
+    }
+
+    async fn create_receiver(
+        &self,
+        rtp_receiver: Arc<RTCRtpReceiver>,
+        track: Arc<TrackRemote>,
+    ) -> WebRTCReceiver {
+        let mut rv = WebRTCReceiver::new(rtp_receiver.clone(), track.clone(), self.id.clone());
+        rv.set_rtcp_channel(self.rtcp_sender_channel.clone());
+        let recv_kind = rv.kind();
+        let stream_id = track.stream_id();
+        let audio_observer = self.audio_observer.clone();
+        rv.register_on_close(Box::new(move || {
+            let stream_id_in = stream_id.clone();
+            let observer_in = audio_observer.clone();
+            Box::pin(async move {
+                if recv_kind == RTPCodecType::Audio {
+                    observer_in.lock().await.remove_stream(&stream_id_in).await;
+                }
+            })
+        }))
+        .await;
+        rv
     }
 
     /// Starts a task that observes audio levels of the tracks in this router.
