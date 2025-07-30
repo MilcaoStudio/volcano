@@ -180,7 +180,7 @@ impl Client {
             Box::pin(async move {
                 if let Some(s) = sender_in.upgrade() {
                     if let Err(err) = s.send(PacketS2C::Offer { description: offer }).await {
-                        error!("on_offer error: {err}");
+                        error!("Send Offer failed: {err}");
                     };
                 }
             })
@@ -195,7 +195,7 @@ impl Client {
                         if let Err(err) = s.send(PacketS2C::Trickle { candidate, target })
                             .await
                         {
-                            error!("on_ice_candidate error: {err}");
+                            error!("Send Trickle failed: {err}");
                         };
                     }
                 })
@@ -214,7 +214,7 @@ impl Client {
                 if state == RTCIceConnectionState::Failed {
                     if let Some(s) = sender_in.upgrade() {
                         if let Err(err) = s.send(PacketS2C::ServerError { error: ServerError::PeerConnectionFailed, }).await {
-                            error!("Write failed: {err}");
+                            error!("Send ServerError failed: {err}");
                         };
                     }
                 }

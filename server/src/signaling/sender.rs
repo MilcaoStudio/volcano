@@ -28,16 +28,11 @@ impl Sender {
     /// Send a packet through the WebSocket
     pub async fn send(&self, packet: PacketS2C) -> anyhow::Result<()> {
         debug!("S->C: {:?}", packet);
-        if let Err(e) =
         self.writer
             .lock()
             .await
             .send(Message::Text(serde_json::to_string(&packet)?))
-            .await {
-                error!("S2C sender error: {e}");
-            };
-
-        Ok(())
+            .await.map_err(Into::into)
     }
 }
 
