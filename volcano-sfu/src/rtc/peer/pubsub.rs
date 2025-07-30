@@ -168,7 +168,7 @@ impl PubSubPeer {
 
         room.add_peer(self.clone()).await;
         info!("[Peer {}] Adds to room {}", id, room.id);
-        room.join_user(id.to_owned(), Vec::default()).await;
+        room.add_user(id.to_owned(), Vec::default());
 
         Ok(())
     }

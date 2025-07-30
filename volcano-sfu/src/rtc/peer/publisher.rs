@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::Mutex;
@@ -26,6 +27,7 @@ pub struct Publisher {
     room: Arc<Room>,
     tracks: Arc<Mutex<Vec<PublisherTrack>>>,
     candidates: Arc<Mutex<Vec<RTCIceCandidateInit>>>,
+    session_version: AtomicU64,
 
     ice_connection_state_change_handler: Arc<Mutex<Option<OnICEConnectionStateChangeFn>>>,
 }
@@ -74,6 +76,7 @@ impl Publisher {
             room,
             candidates: Arc::new(Mutex::new(Vec::new())),
             ice_connection_state_change_handler: Arc::default(),
+            session_version: AtomicU64::default(),
         };
 
         publisher.on_track().await;
@@ -105,6 +108,7 @@ impl Publisher {
                         debug!("This offer contains a new session version. Candidates are cleaned up.");
                     }
                 }
+                self.session_version.store(current_session.origin.session_version, Ordering::Relaxed);
         }
 
         self.pc.set_remote_description(offer).await?;
@@ -163,8 +167,8 @@ impl Publisher {
         let room_out_2 = Arc::clone(&self.room);
         let tracks_out = Arc::clone(&self.tracks);
         let peer_id_out_2 = self.id.clone();
-        let pc_out = self.pc.clone();
         let user_id_out = self.id.clone();
+        let pc_out = self.pc.clone();
 
         self.pc.on_track(Box::new(
             move |track: Arc<TrackRemote>, receiver: Arc<RTCRtpReceiver>, _: Arc<RTCRtpTransceiver>| {
@@ -183,7 +187,7 @@ impl Publisher {
                     let (r, publish) = router_in
                         .add_receiver(receiver, track_clone.clone(),)
                         .await;
-                    debug!("Add track receiver with track {} into router", r.track_id());
+                    debug!("[Publisher {}] Add track receiver with track {} into router", user_id_in, r.track_id());
                     let receiver_clone = r.clone();
                     
                     if publish {
@@ -201,7 +205,7 @@ impl Publisher {
                         })
                     }
                     let tracks: Vec<String> = tracks_in.lock().await.iter().map(|t: &PublisherTrack| t.track.id()).collect();
-                    room_in.join_user(user_id_in, tracks).await;
+                    room_in.add_user(user_id_in, tracks);
                 })
             })
         );
@@ -258,6 +262,10 @@ impl Publisher {
 
     pub fn router(&self) -> Arc<LocalRouter> {
         self.router.clone()
+    }
+
+    pub fn session_version(&self) -> u64 {
+        self.session_version.load(Ordering::Acquire)
     }
 
     pub fn signaling_state(&self) -> webrtc::peer_connection::signaling_state::RTCSignalingState {

@@ -294,20 +294,20 @@ impl Room {
         self.user_tracks.contains_key(id)
     }
 
-    /// Join a new user into the room
-    pub async fn join_user(&self, id: String, tracks: Vec<String>) {
+    /// Adds an user into this room and triggers [RoomEvent::UserJoin]
+    pub fn add_user(&self, user_id: String, tracks: Vec<String>) {
         let ev = RoomEvent::UserJoin {
             room_id: self.id.clone(),
-            user_id: id.clone(),
+            user_id: user_id.clone(),
             user_tracks: tracks.clone(),
         };
         
         if self.user_tracks.len() > 0 {
-            self.send_message(ev).await;
+            self.trigger_event(ev);
         }
 
         // Insert tracks
-        self.user_tracks.insert(id, tracks);
+        self.user_tracks.insert(user_id, tracks);
     }
 
     pub fn get_room_info(&self) -> RoomInfo {
@@ -399,7 +399,7 @@ impl Room {
         }
     }
 
-    pub async fn trigger_event(&self, event: RoomEvent) {
+    pub fn trigger_event(&self, event: RoomEvent) {
         let id = &self.id;
         debug!("[Room {id}] Sending event {:?}", event);
         match self.event_sender.send(event) {
