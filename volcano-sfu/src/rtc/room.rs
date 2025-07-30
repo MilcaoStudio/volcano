@@ -8,12 +8,8 @@ use std::{
 };
 
 use dashmap::{DashMap, DashSet};
-use postage::{
-    broadcast::{Receiver, Sender, channel},
-    sink::Sink,
-};
-use tokio::sync::Mutex;
-use ulid::Ulid;
+
+use tokio::sync::{broadcast::{self, Receiver, Sender}};
 use webrtc::{
     data::data_channel::DataChannel,
     data_channel::{
@@ -76,9 +72,7 @@ pub struct Room {
     labels: DashSet<String>,
     /// The room is already closed
     closed: Arc<AtomicBool>,
-    /// Signalers for this room
-    signalers: Arc<Mutex<Vec<Arc<RoomSignal>>>>,
-    sender: Sender<RoomEvent>,
+    event_sender: Sender<RoomEvent>,
     //participants: DashSet<String>,
     //audio_observer: Arc<Mutex<AudioObserver>>,
     user_tracks: DashMap<String, Vec<String>>,
@@ -89,18 +83,13 @@ pub struct Room {
 impl Room {
     /// Create a new Room and initialise internal channels and maps
     pub fn new(id: String) -> Arc<Self> {
-        let (sender, _dropped) = channel(10);
-        //let audio_threshold = router_config.audio_level_threshold;
-        //let audio_interval = router_config.audio_level_interval;
-        //let audio_filter = router_config.audio_level_filter;
-        //let audio_observer = AudioObserver::new(audio_threshold, audio_interval, audio_filter);
-
+        let (s, _) = broadcast::channel::<RoomEvent>(8);
+        
         Arc::new(Room {
             closed: Default::default(),
             data_channels: Default::default(),
             id,
-            sender,
-            signalers: Default::default(),
+            event_sender: s,
             labels: Default::default(),
             peers: Default::default(),
             //audio_observer: Arc::new(Mutex::new(audio_observer)),
@@ -210,14 +199,8 @@ impl Room {
         self.peers.insert(id, peer);
     }
 
-    pub async fn unsubscribe_signal(&self, id: &str) {
-        self.signalers.lock().await.retain(|s| s.id != id);
-    }
-
     pub async fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
-        self.publish(RoomEvent::Close(self.id.clone())).await;
-        self.signalers.lock().await.clear();
     }
 
     pub fn get_data_channel_middlewares(&self) -> Arc<Vec<Arc<DataChannel>>> {
@@ -258,13 +241,6 @@ impl Room {
         self.user_tracks.len() == 0
     }
 
-    /// Publish an event to the room
-    pub async fn publish(&self, event: RoomEvent) {
-        for signal in &*self.signalers.lock().await {
-            signal.publish(&self.id, event.clone());
-        }
-    }
-
     /// Fanouts raw message received from any data channel to subscribed data channels
     async fn fanout_message(&self, origin: String, label: String, msg: DataChannelMessage) {
         info!(
@@ -293,8 +269,8 @@ impl Room {
     }
 
     /// Listen for events from the room
-    pub fn listener(&self) -> Receiver<RoomEvent> {
-        self.sender.subscribe()
+    pub fn subscribe_to_events(&self) -> Receiver<RoomEvent> {
+        self.event_sender.subscribe()
     }
 
     pub async fn remove_peer(&self, peer_id: &str) -> usize {
@@ -347,26 +323,9 @@ impl Room {
         }
     }
 
-    pub async fn subscribe(self: &Arc<Self>, peer: Arc<PubSubPeer>) {
-        // Subscriber data channels to peer subscriber
-        for label in self.labels.iter() {
-            let room_out = self.clone();
-            let lbl_out = label.clone();
-            if let Some(subscriber) = peer.subscriber().await {
-                let sub_out = subscriber.clone();
-                match subscriber.create_data_channel(label.clone()).await {
-                    Ok(dc) => dc.on_message(Box::new(move |msg| {
-                        let room_in = room_out.clone();
-                        let origin = sub_out.clone().id.clone();
-                        let lbl_in = lbl_out.clone();
-                        Box::pin(async move {
-                            room_in.fanout_message(origin, lbl_in, msg).await;
-                        })
-                    })),
-                    _ => continue,
-                }
-            }
-        }
+    pub async fn subscribe_peer(self: &Arc<Self>, peer: Arc<PubSubPeer>) {
+        // Removed massive data channel creation
+        
 
         if let Some(publisher) = peer.publisher().await {
             publisher.router().start_audio_observer_task().await;
@@ -437,6 +396,19 @@ impl Room {
                 user_id: id.to_owned(),
             })
             .await;
+        }
+    }
+
+    pub async fn trigger_event(&self, event: RoomEvent) {
+        let id = &self.id;
+        debug!("[Room {id}] Sending event {:?}", event);
+        match self.event_sender.send(event) {
+            Ok(count) => {
+                debug!("[Room {id}] Event sent to {count} listeners");
+            },
+            Err(err) => {
+                error!("[Room {id}] Send event failed: {err}");
+            }
         }
     }
 
@@ -539,30 +511,5 @@ impl Room {
         } else {
             error!("Error parsing {:?}", msg);
         };
-    }
-}
-
-#[derive(Debug)]
-pub struct RoomSignal {
-    pub id: String,
-    sender: Sender<RoomEvent>,
-}
-
-impl RoomSignal {
-    pub fn new(id: Option<String>) -> Arc<Self> {
-        let (sender, _dropped) = channel::<RoomEvent>(10);
-        Arc::new(Self {
-            id: id.unwrap_or(Ulid::new().to_string()),
-            sender,
-        })
-    }
-
-    pub fn listener(&self) -> Receiver<RoomEvent> {
-        self.sender.subscribe()
-    }
-
-    pub fn publish(&self, id: &str, event: RoomEvent) -> bool {
-        info!("Room manager emitted {:?} for room {}", event, id);
-        self.sender.clone().try_send(event).is_ok()
     }
 }

@@ -14,14 +14,14 @@ type Sink = SplitSink<WebSocketStream<TcpStream>, Message>;
 /// Sink side of the WebSocket stream behind a Mutex for distributed writing
 #[derive(Clone)]
 pub struct Sender {
-    write: Arc<Mutex<Sink>>,
+    writer: Arc<Mutex<Sink>>,
 }
 
 impl Sender {
     /// Create a new Sender
     pub fn new(sink: Sink) -> Self {
         Sender {
-            write: Arc::new(Mutex::new(sink)),
+            writer: Arc::new(Mutex::new(sink)),
         }
     }
 
@@ -29,7 +29,7 @@ impl Sender {
     pub async fn send(&self, packet: PacketS2C) -> anyhow::Result<()> {
         debug!("S->C: {:?}", packet);
         if let Err(e) =
-        self.write
+        self.writer
             .lock()
             .await
             .send(Message::Text(serde_json::to_string(&packet)?))
