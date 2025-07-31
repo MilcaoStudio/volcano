@@ -679,94 +679,120 @@ impl Receiver for WebRTCReceiver {
         loop {
             if let Some(buffer) = &self.buffers.lock().await[layer] {
                 interval.tick().await;
-                match buffer.read_extended().await {
-                    Ok(pkt) => {
-                        if self.is_simulcast && self.pending[layer].load(Ordering::Relaxed) {
-                            debug!("Reading packet on layer {layer} in simulcast receiver");
-                            if pkt.key_frame {
-                                //use tmp_val here just to skip the build error
-                                let mut pending_tracks = Vec::new();
-                                for dt in &*self.pending_tracks[layer].lock().await {
-                                    pending_tracks.push((
-                                        dt.current_spatial_layer() as usize,
-                                        dt.id().clone(),
-                                        dt.clone(),
-                                    ));
-                                }
-                                for (dt_layer, id, dt) in pending_tracks {
-                                    // Delete downtrack from its layer
-                                    if let Err(err) = self.delete_down_track(dt_layer, id).await {
-                                        error!("[Receiver {}] Failed to delete down track: {}", self.peer_id, err);
-                                    };
-                                    // Store downtrack in current layer
-                                    self.store_down_track(layer, dt.clone()).await;
-                                    dt.switch_spatial_layer_forced(layer as u8);
-                                }
-                                // Cleanup
-                                self.pending_tracks[layer].lock().await.clear();
-                                self.pending[layer].store(false, Ordering::Relaxed);
-                            } else {
-                                if !self.is_recent_pli() {
-                                    let sender_ssrc = rand::random::<u32>();
-                                    let media_ssrc = self.ssrc(layer).await;
-                                    
-                                    
-                                    debug!(
-                                        "Send PLI, sender ssrc {sender_ssrc}, media_ssrc {media_ssrc}"
-                                    );
-                                    self.send_rtcp(vec![Box::new(PictureLossIndication {
-                                        sender_ssrc,
-                                        media_ssrc,
-                                    })])
-                                    .await?;
-                                }
-                            }
-                        }
-
-                        let mut delete_down_track_params = Vec::new();
-                        {
-                            let dts = self.down_tracks[layer].lock().await;
-                            
-                            for dt in &*dts {
-                                if let Err(Error::ErrWebRTC(e)) = dt.forward_rtp(pkt.clone(), layer).await
-                                {
-                                    match e {
-                                        RTCError::ErrClosedPipe
-                                        | RTCError::ErrDataChannelNotOpen
-                                        | RTCError::ErrConnectionClosed => {
-                                            error!(
-                                                    "down track write error {}, layer {}, queued for remove",
-                                                    e,
-                                                    layer
-                                                );
-                                            delete_down_track_params.push((layer, dt.id().clone()));
+                let mut close = buffer.close_rx.lock().await;
+                tokio::select! {
+                    read = buffer.read_extended() => {
+                        match read {
+                            Ok(pkt) => {
+                                if self.is_simulcast && self.pending[layer].load(Ordering::Relaxed) {
+                                    debug!("Reading packet on layer {layer} in simulcast receiver");
+                                    if pkt.key_frame {
+                                        //use tmp_val here just to skip the build error
+                                        let mut pending_tracks = Vec::new();
+                                        for dt in &*self.pending_tracks[layer].lock().await {
+                                            pending_tracks.push((
+                                                dt.current_spatial_layer() as usize,
+                                                dt.id().clone(),
+                                                dt.clone(),
+                                            ));
                                         }
-                                        _ => {
-                                            error!(
-                                                "down track unknown write error {}, layer {}",
-                                                e, layer
+                                        for (dt_layer, id, dt) in pending_tracks {
+                                            // Delete downtrack from its layer
+                                            if let Err(err) = self.delete_down_track(dt_layer, id).await {
+                                                error!("[Receiver {}] Failed to delete down track: {}", self.peer_id, err);
+                                            };
+                                            // Store downtrack in current layer
+                                            self.store_down_track(layer, dt.clone()).await;
+                                            dt.switch_spatial_layer_forced(layer as u8);
+                                        }
+                                        // Cleanup
+                                        self.pending_tracks[layer].lock().await.clear();
+                                        self.pending[layer].store(false, Ordering::Relaxed);
+                                    } else {
+                                        if !self.is_recent_pli() {
+                                            let sender_ssrc = rand::random::<u32>();
+                                            let media_ssrc = self.ssrc(layer).await;
+                                            
+                                            
+                                            debug!(
+                                                "Send PLI, sender ssrc {sender_ssrc}, media_ssrc {media_ssrc}"
                                             );
+                                            self.send_rtcp(vec![Box::new(PictureLossIndication {
+                                                sender_ssrc,
+                                                media_ssrc,
+                                            })])
+                                            .await?;
                                         }
                                     }
                                 }
+            
+                                let mut delete_down_track_params = Vec::new();
+                                {
+                                    let dts = self.down_tracks[layer].lock().await;
+                                    
+                                    for dt in &*dts {
+                                        if let Err(Error::ErrWebRTC(e)) = dt.forward_rtp(pkt.clone(), layer).await
+                                        {
+                                            match e {
+                                                RTCError::ErrClosedPipe
+                                                | RTCError::ErrDataChannelNotOpen
+                                                | RTCError::ErrConnectionClosed => {
+                                                    error!(
+                                                            "down track write error {}, layer {}, queued for remove",
+                                                            e,
+                                                            layer
+                                                        );
+                                                    delete_down_track_params.push((layer, dt.id().clone()));
+                                                }
+                                                _ => {
+                                                    error!(
+                                                        "down track unknown write error {}, layer {}",
+                                                        e, layer
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+            
+                                // Delete downtracks which received error at sending RTP
+                                for (layer, id) in delete_down_track_params {
+                                    if let Err(err) = self.delete_down_track(layer, id).await {
+                                        error!("[Receiver {}] Failed to delete down track: {}", self.peer_id, err);
+                                    };
+                                }
                             }
-                        }
-
-                        // Delete downtracks which received error at sending RTP
-                        for (layer, id) in delete_down_track_params {
-                            if let Err(err) = self.delete_down_track(layer, id).await {
-                                error!("[Receiver {}] Failed to delete down track: {}", self.peer_id, err);
-                            };
+                            Err(e) => match e {
+                                BufferError::ErrIOEof => {
+                                    error!("read_extended -> Buffer EOF");
+                                }
+                                _ => {
+                                    error!("read_extended -> {e}");
+                                }
+                            },
                         }
                     }
-                    Err(e) => match e {
-                        BufferError::ErrIOEof => {
-                            error!("read_extended -> Buffer EOF");
+
+                    _ = close.recv() => {
+                        if self.is_simulcast && self.pending[layer].load(Ordering::Relaxed) {
+                            for dt in &*self.pending_tracks[layer].lock().await {
+                                info!("Closing track {}", dt.id());
+                                dt.close().await;
+                            }
+                             // Cleanup
+                             info!("Clear pending tracks from layer #{}", layer);
+                             self.pending_tracks[layer].lock().await.clear();
+                             self.pending[layer].store(false, Ordering::Relaxed);
+                        } else {
+                            let mut dts = self.down_tracks[layer].lock().await;
+                            for dt in &*dts {
+                                info!("Closing track {}", dt.id());
+                                dt.close().await;
+                            }
+                            info!("Clear tracks from layer #{}", layer);
+                            dts.clear();
                         }
-                        _ => {
-                            error!("read_extended -> {e}");
-                        }
-                    },
+                    }
                 }
             }
         }

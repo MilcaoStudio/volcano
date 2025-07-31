@@ -35,4 +35,9 @@ impl AtomicFactory {
             AtomicBuffer::new(ssrc)
         )).clone()
     }
+
+    pub async fn get_rtp_buffer(&self, ssrc: u32) -> Option<Arc<AtomicBuffer>> {
+        let factory = self.factory.lock().await;
+        factory.rtp_buffers.get(&ssrc).cloned()
+    }
 }

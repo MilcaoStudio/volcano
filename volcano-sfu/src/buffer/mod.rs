@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::time::Instant;
 use std::{pin::Pin, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tokio::time::{Duration, sleep};
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
@@ -289,6 +289,8 @@ impl Buffer {
 
 pub struct AtomicBuffer {
     buffer: Arc<Mutex<Buffer>>,
+    close_sender: broadcast::Sender<()>,
+    pub close_rx: Arc<Mutex<broadcast::Receiver<()>>>,
 }
 
 #[async_trait]
@@ -348,15 +350,26 @@ impl BufferIO for AtomicBuffer {
     async fn close(&self) -> Result<()> {
         //let buffer = self.buffer.lock().await;
         //if buffer.bucket.is_some() && buffer.codec_type == RTPCodecType::Video {}
-
+        let buf = self.buffer.lock().await;
+            if !buf.ext_packets.is_empty() {
+                warn!("{} pending packets will be lost", buf.ext_packets.len());
+            }
+            
+            if let Err(_) = self.close_sender.send(()) {
+                warn!("close_rx dropped");
+            };
+        
         Ok(())
     }
 }
 
 impl AtomicBuffer {
     pub fn new(ssrc: u32) -> Self {
+        let (s, r) = broadcast::channel::<()>(1);
         Self {
             buffer: Arc::new(Mutex::new(Buffer::new(ssrc))),
+            close_sender: s,
+            close_rx: Arc::new(Mutex::new(r)),
         }
     }
 

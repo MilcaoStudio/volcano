@@ -8,9 +8,11 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::{Duration, sleep};
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::rtcp::goodbye::Goodbye;
 use webrtc::rtcp::header::PacketType;
 use webrtc::rtcp::packet::Packet as RtcpPacket;
 use webrtc::rtcp::sender_report::SenderReport;
+use webrtc::rtcp::source_description::SourceDescription;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
@@ -56,8 +58,8 @@ pub struct LocalRouter {
     rtcp_receiver_channel: Arc<Mutex<RtcpDataReceiver>>,
     stop_sender_channel: Arc<Sender<()>>,
     config: RouterConfig,
-    receivers: Arc<Mutex<DashMap<String, Arc<WebRTCReceiver>>>>,
-    buffer_factory: AtomicFactory,
+    receivers: Arc<DashMap<String, Arc<WebRTCReceiver>>>,
+    buffer_factory: Arc<AtomicFactory>,
     rtcp_writer_handler: Arc<Mutex<Option<RtcpWriterFn>>>,
     room: Arc<Room>,
     on_add_receiver_track_handler: Arc<Mutex<Option<OnAddReciverTrackFn>>>,
@@ -87,9 +89,9 @@ impl LocalRouter {
             rtcp_receiver_channel: Arc::new(Mutex::new(r)),
             stop_sender_channel: Arc::new(sender),
             config,
-            receivers: Arc::new(Mutex::new(DashMap::new())),
+            receivers: Arc::default(),
             room,
-            buffer_factory: AtomicFactory::default(),
+            buffer_factory: Arc::default(),
             rtcp_writer_handler: Arc::new(Mutex::new(None)),
             on_add_receiver_track_handler: Arc::new(Mutex::new(None)),
             on_del_receiver_track_handler: Arc::new(Mutex::new(None)),
@@ -291,21 +293,14 @@ impl LocalRouter {
             };
             should_negotiate = true;
         }
-
-        let recs = self
-            .receivers
-            .lock()
-            .await
-            .iter()
-            .map(|r| r.clone())
-            .collect::<Vec<_>>();
-
+        
+        let recs = &self.receivers;
         if !recs.is_empty() {
             info!(
                 "[Router {}] Subscriber {} adds downtracks from stored receivers",
                 self.id, subscriber.id
             );
-            for val in &recs {
+            for val in recs.iter() {
                 if let Err(err) = self.add_down_track(subscriber.clone(), val.clone()).await {
                     error!("add_down_track err: {}", err);
                 };
@@ -400,21 +395,26 @@ impl LocalRouter {
         //let stats_out = Arc::clone(&self.stats);
         let buffer_out = Arc::clone(&buffer);
         let with_status = self.config.with_stats;
+        let factory = self.buffer_factory.clone();
         rtcp_reader
             .set_on_packets(Box::new(move |pkts| {
                 let buffer_in = Arc::clone(&buffer_out);
+                let factory_in = factory.clone();
                 Box::pin(async move {
                     for pkt in pkts {
                         match pkt.header().packet_type {
                             PacketType::SourceDescription => {
-                                // TODO: send stats
-                                info!("Packet SourceDescription received");
+                                if let Some(_) = pkt.as_any().downcast_ref::<SourceDescription>() {
+                                    
+                                    // TODO: send stats
+                                }
+                                info!("SourceDescription");
                             }
                             PacketType::SenderReport => {
-                                info!("Packet SenderReport");
                                 if let Some(sender_report) =
-                                    pkt.as_any().downcast_ref::<SenderReport>()
+                                pkt.as_any().downcast_ref::<SenderReport>()
                                 {
+                                    info!("SenderReport");
                                     buffer_in
                                         .set_sender_report_data(
                                             sender_report.rtp_time,
@@ -426,6 +426,23 @@ impl LocalRouter {
                                     }
                                 };
                             }
+                            PacketType::Goodbye => {
+                                if let Some(bye) = pkt.as_any().downcast_ref::<Goodbye>() {
+                                    debug!("Bye packet");
+                                    for ssrc in &bye.sources {
+                                        match factory_in.get_rtp_buffer(*ssrc).await {
+                                            Some(buffer) => {
+                                                // this function always returns Ok
+                                                debug!("Closing buffer ssrc={ssrc}");
+                                                buffer.close().await.unwrap();
+                                            },
+                                            _ => {
+                                                warn!("Do not exist RTP buffer for closing track ssrc={ssrc}");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             packet_type => {
                                 debug!("Unhandled packet type {}", packet_type);
                             }
@@ -435,16 +452,15 @@ impl LocalRouter {
             }))
             .await;
 
-        let receivers = self.receivers.lock().await;
         let arc_receiver;
-        match receivers.get(&track_id) {
+        match self.receivers.get(&track_id) {
             Some(r) => arc_receiver = r.clone(),
             None => {
                 let rtc_rv = self
                     .create_receiver(rtp_receiver.clone(), track.clone())
                     .await;
                 arc_receiver = Arc::new(rtc_rv);
-                receivers.insert(track_id, arc_receiver.clone());
+                self.receivers.insert(track_id, arc_receiver.clone());
                 published = true;
                 info!("Track {} published", track.id());
 
@@ -556,7 +572,7 @@ impl LocalRouter {
 
                         if let Some(streams) = streams {
                             info!("Streams {:?}", streams);
-                            room_out.send_message(RoomEvent::VoiceActivity { room_id: room_out.id.clone(), stream_ids: streams }).await;
+                            room_out.trigger_event(RoomEvent::VoiceActivity { room_id: room_out.id.clone(), stream_ids: streams });
                         }
                     }
                     _ = stop_receiver.recv() => {
@@ -606,7 +622,7 @@ impl LocalRouter {
         }
 
         info!("[Router {}] Stopping receivers", self.id);
-        for item in self.receivers.lock().await.iter() {
+        for item in self.receivers.iter() {
             let id = item.key();
             let receiver = item.value();
 
