@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::Mutex;
@@ -36,6 +36,7 @@ pub struct Subscriber {
     pub no_auto_subscribe: bool,
     negotiation_pending: AtomicBool,
     api_channel_open: Arc<AtomicBool>,
+    session_version: AtomicU64,
 }
 
 pub type OnRenegotiateFn =
@@ -61,6 +62,7 @@ impl Subscriber {
             no_auto_subscribe: Default::default(),
             negotiation_pending: Default::default(),
             api_channel_open: open,
+            session_version: AtomicU64::default(),
         };
         Ok(subscriber)
     }
@@ -133,6 +135,9 @@ impl Subscriber {
     pub async fn create_offer(&self, options: Option<RTCOfferOptions>) -> Result<RTCSessionDescription> {
         let offer = self.pc.create_offer(options).await?;
         self.pc.set_local_description(offer.clone()).await?;
+        if let Some(description) = offer.clone().unmarshal().ok() {
+            self.session_version.store(description.origin.session_version, Ordering::Release);
+        }
         Ok(offer)
     }
 
@@ -140,8 +145,8 @@ impl Subscriber {
         let id = &self.id;
         let dt_id = down_track.id();
         let mut tracks = self.tracks.lock().await;
-        let vec = tracks.entry(stream_id.clone()).or_insert(Vec::default());
         info!("[Subscriber {id}] add_down_track {dt_id} into stream {stream_id}");
+        let vec = tracks.entry(stream_id).or_insert(Vec::default());
         vec.push(down_track);
     }
 
@@ -314,15 +319,19 @@ impl Subscriber {
 
         let id = self.id.clone();
         tokio::spawn(async move {
-            for i in 1..6 {
+            for i in 1..=6 {
                 debug!("[Subscriber {id}] Send source description ({i}/6)");
                 if let Err(err) = pc_out.write_rtcp(&rtcp_packets[..]).await {
-                    warn!("write rtcp error: {}", err);
+                    warn!("[Subscriber {id}] Send source description failed : {}", err);
                 }
 
                 sleep(Duration::from_millis(20)).await;
             }
         });
+    }
+
+    pub fn session_version(&self) -> u64 {
+        self.session_version.load(Ordering::Acquire)
     }
 
     pub async fn set_remote_description(&self, sdp: RTCSessionDescription) -> Result<()> {

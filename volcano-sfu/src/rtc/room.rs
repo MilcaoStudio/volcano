@@ -1,13 +1,10 @@
 use std::{
-    collections::BTreeMap,
-    fmt::Debug,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    collections::HashMap, fmt::Debug, sync::{
+        atomic::{AtomicBool, Ordering}, Arc
+    }
 };
 
-use dashmap::{DashMap, DashSet};
+use dashmap::{DashMap, DashSet, Entry};
 
 use tokio::sync::{broadcast::{self, Receiver, Sender}};
 use webrtc::{
@@ -26,41 +23,54 @@ use crate::track::{receiver::WebRTCReceiver, router::LocalRouter};
 
 use super::peer::PubSubPeer;
 
+#[derive(Debug, Clone, Serialize)]
+pub struct UserStream {
+    pub id: String,
+    pub tracks: Vec<String>,
+    pub simulcast: bool,
+}
+
 /// Room event which indicates something happened to a peer
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
+#[non_exhaustive]
 pub enum RoomEvent {
-    Create(String),
-    Close(String),
-    RelayPeerRequest {
-        payload: String,
-        room_id: String,
-    },
-    DataChannelMessage(Vec<u8>),
+    RoomCreated(String),
+    RoomClosed(String),
     RoomInfo(RoomInfo),
-    RemoveTrack {
+    TracksRemoved {
         removed_tracks: Vec<String>,
-        room: String,
+        room_id: String,
     },
     VoiceActivity {
         room_id: String,
         stream_ids: Vec<String>,
     },
-    UserJoin {
+    UserSpeaking {
         room_id: String,
-        user_id: String,
-        user_tracks: Vec<String>,
+        uid: String,
+        sids: Vec<String>,
+    },
+    UserJoined {
+        room_id: String,
+        uid: String,
+    },
+    TrackAdded {
+        room_id: String,
+        uid: String,
+        track: String,
+        stream: UserStream,
     },
     UserLeft {
         room_id: String,
-        user_id: String,
+        uid: String,
     },
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RoomInfo {
     pub id: String,
-    pub users: BTreeMap<String, Vec<String>>,
+    pub users: HashMap<String, Vec<String>>,
 }
 
 /// Room consisting of clients which can communicate with one another
@@ -76,6 +86,7 @@ pub struct Room {
     //participants: DashSet<String>,
     //audio_observer: Arc<Mutex<AudioObserver>>,
     user_tracks: DashMap<String, Vec<String>>,
+    user_streams: DashMap<String, Vec<UserStream>>,
     peers: DashMap<String, Arc<PubSubPeer>>,
     tracks: DashMap<String, Arc<TrackLocalStaticRTP>>,
 }
@@ -94,6 +105,7 @@ impl Room {
             peers: Default::default(),
             //audio_observer: Arc::new(Mutex::new(audio_observer)),
             user_tracks: Default::default(),
+            user_streams: Default::default(),
             tracks: Default::default(),
         })
     }
@@ -294,25 +306,66 @@ impl Room {
         self.user_tracks.contains_key(id)
     }
 
-    /// Adds an user into this room and triggers [RoomEvent::UserJoin]
-    pub fn add_user(&self, user_id: String, tracks: Vec<String>) {
-        let ev = RoomEvent::UserJoin {
-            room_id: self.id.clone(),
-            user_id: user_id.clone(),
-            user_tracks: tracks.clone(),
-        };
+    /// Adds an user into this room and triggers [RoomEvent::UserJoined]
+    pub fn add_user(&self, user_id: String) {
+
+        let room_id = self.id.clone();
+        let uid = user_id.clone();
+
+        let ev = RoomEvent::UserJoined { room_id, uid };
         
-        if self.user_tracks.len() > 0 {
+        if self.user_streams.len() > 0 {
             self.trigger_event(ev);
         }
+    }
 
-        // Insert tracks
-        self.user_tracks.insert(user_id, tracks);
+
+    /// Adds a track for the given user, looking up for existing streams and pushing
+    pub fn add_user_track(&self, user_id: String, stream_id: String, track_id: String, simulcast: bool) {
+
+        let track_id_1 = track_id.clone();
+        let updated = match self.user_streams.entry(user_id.clone()) {
+            Entry::Occupied(mut entry) => {
+                let streams = entry.get_mut();
+                let existing = streams.iter_mut().find(|s| s.id == stream_id);
+                match existing {
+                    // Case 1: Exists stream with same id, push track id in stream
+                    Some(stream) => {
+                        stream.tracks.push(track_id_1);
+                        stream.clone()
+                    },
+                    // Case 2: Does not exist stream with that id, push stream
+                    _ => {
+                        let new_stream = UserStream {
+                            id: stream_id,
+                            tracks: vec![track_id_1],
+                            simulcast,
+                        };
+                        streams.push(new_stream.clone());
+                        new_stream
+                    }
+                }
+            },
+            Entry::Vacant(entry) => {
+                // Case 3: Does not exist user (very rare), insert them
+                let s = UserStream {
+                    id: stream_id,
+                    tracks: vec![track_id_1],
+                    simulcast,
+                };
+                entry.insert(vec![s.clone()]);
+                s
+            }
+        };
+        
+        let ev = RoomEvent::TrackAdded { room_id: self.id.clone(), uid: user_id, track: track_id, stream: updated };
+
+        self.trigger_event(ev);
     }
 
     pub fn get_room_info(&self) -> RoomInfo {
         let user_tracks = self.user_tracks.clone();
-        let mut users = BTreeMap::new();
+        let mut users = HashMap::new();
         // Serialize user tracks
         user_tracks.into_iter().for_each(|(key, value)| {
             users.insert(key, value);
@@ -382,20 +435,18 @@ impl Room {
             }
 
             //self.publish(RoomEvent::RemoveTrack {
-            self.send_message(RoomEvent::RemoveTrack {
-                room: self.id.clone(),
+            self.trigger_event(RoomEvent::TracksRemoved {
+                room_id: self.id.clone(),
                 removed_tracks,
-            })
-            .await;
+            });
         }
 
         if self.user_tracks.len() > 0 {
             // Let everyone know we left
-            self.send_message(RoomEvent::UserLeft {
+            self.trigger_event(RoomEvent::UserLeft {
                 room_id: self.id.clone(),
-                user_id: id.to_owned(),
-            })
-            .await;
+                uid: id.to_owned(),
+            });
         }
     }
 
@@ -429,9 +480,9 @@ impl Room {
     pub async fn remove_track(&self, id: String) {
         self.close_track(&id);
 
-        self.send_message(RoomEvent::RemoveTrack {
+        self.send_message(RoomEvent::TracksRemoved {
             removed_tracks: vec![id],
-            room: self.id.clone(),
+            room_id: self.id.clone(),
         })
         .await;
     }

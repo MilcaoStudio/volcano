@@ -265,12 +265,24 @@ impl Client {
             room.subscribe_peer(peer.clone()).await;
         }
 
-
         // Send room info
         let room_info = room.get_room_info();
         if let Err(err) = sender.send(PacketS2C::RoomInfo { room: room_info }).await {
             error!("send room info error: {}", err);
         };
+
+        // Listen to room events
+        let mut event_rx = room.subscribe_to_events();
+        tokio::spawn(async move {
+            // Moves room
+            while let Ok(event) = event_rx.recv().await {
+                debug!("{:?}", event);
+                // TODO: send event using subscriber data channel
+            }
+            debug!("Room event sender closed");
+        });
+
+        // End message handle
         Ok(())
     }
 

@@ -12,7 +12,7 @@ use webrtc::rtp_transceiver::RTCRtpTransceiver;
 use webrtc::track::track_remote::TrackRemote;
 
 use crate::rtc::config::WebRTCTransportConfig;
-use crate::rtc::room::Room;
+use crate::rtc::room::{Room};
 use crate::track::receiver::Receiver;
 use crate::track::router::LocalRouter;
 
@@ -183,13 +183,13 @@ impl Publisher {
                     let track_stream_id = track.stream_id();
                     let track_clone = track.clone();
                     info!("Track {} from stream {} received", track_id, track_stream_id);
+                    let receiver_2 = receiver.clone();
 
                     let (r, publish) = router_in
                         .add_receiver(receiver, track_clone.clone(),)
                         .await;
                     debug!("[Publisher {}] Add track receiver with track {} into router", user_id_in, r.track_id());
                     let receiver_clone = r.clone();
-                    
                     if publish {
                         room_in.publish_track(router_in2, r.clone()).await;
                         tracks_in.lock().await.push(PublisherTrack {
@@ -204,8 +204,13 @@ impl Publisher {
                             client_relay: false,
                         })
                     }
-                    let tracks: Vec<String> = tracks_in.lock().await.iter().map(|t: &PublisherTrack| t.track.id()).collect();
-                    room_in.add_user(user_id_in, tracks);
+                    let recv_tracks = receiver_2.tracks().await;
+                    let tracks = recv_tracks.iter().map(|t| (t.id(), t.rid())).collect::<Vec<_>>();
+                    for (track_id, track_rid) in tracks {
+                        info!("[Publisher {}] Adding track {} [{}] to user", user_id_in, track_id, track_rid);
+                        room_in.add_user_track(user_id_in.clone(), track_stream_id.clone(), track_id, track_rid.len() > 0);
+                    }
+                    
                 })
             })
         );
