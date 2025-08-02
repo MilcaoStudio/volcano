@@ -70,7 +70,7 @@ pub enum RoomEvent {
 #[derive(Clone, Debug, Serialize)]
 pub struct RoomInfo {
     pub id: String,
-    pub users: HashMap<String, Vec<String>>,
+    pub users: HashMap<String, Vec<UserStream>>,
 }
 
 /// Room consisting of clients which can communicate with one another
@@ -288,7 +288,8 @@ impl Room {
     pub async fn remove_peer(&self, peer_id: &str) -> usize {
         if let Some((_, peer)) = self.peers.remove(peer_id) {
             peer.clean_up().await;
-        };
+            debug!("peer: {} strong references left", Arc::strong_count(&peer));
+        }; // Drop peer
 
         self.peers.len()
     }
@@ -364,10 +365,10 @@ impl Room {
     }
 
     pub fn get_room_info(&self) -> RoomInfo {
-        let user_tracks = self.user_tracks.clone();
+        let streams = self.user_streams.clone();
         let mut users = HashMap::new();
         // Serialize user tracks
-        user_tracks.into_iter().for_each(|(key, value)| {
+        streams.into_iter().for_each(|(key, value)| {
             users.insert(key, value);
         });
         RoomInfo {
@@ -376,7 +377,7 @@ impl Room {
         }
     }
 
-    pub async fn subscribe_peer(self: &Arc<Self>, peer: Arc<PubSubPeer>) {
+    pub async fn subscribe_peer(&self, peer: Arc<PubSubPeer>) {
         // Removed massive data channel creation
         
 
@@ -424,24 +425,17 @@ impl Room {
     /// Remove a user from the room
     pub async fn remove_user(&self, id: &str) {
         // Find all associated track information
-        if let Some((_, tracks)) = self.user_tracks.remove(id) {
-            let removed_tracks = tracks.clone();
-
-            // Release Mutex lock
-            drop(tracks);
-
-            for id in &removed_tracks {
-                self.close_track(id);
+        if let Some((_, streams)) = self.user_streams.remove(id) {
+            for stream in &streams {
+                for track_id in &stream.tracks {
+                    self.close_track(track_id);
+                }
             }
 
-            //self.publish(RoomEvent::RemoveTrack {
-            self.trigger_event(RoomEvent::TracksRemoved {
-                room_id: self.id.clone(),
-                removed_tracks,
-            });
+            // Client should remove tracks on user left event
         }
 
-        if self.user_tracks.len() > 0 {
+        if !self.user_streams.is_empty() {
             // Let everyone know we left
             self.trigger_event(RoomEvent::UserLeft {
                 room_id: self.id.clone(),
@@ -452,7 +446,6 @@ impl Room {
 
     pub fn trigger_event(&self, event: RoomEvent) {
         let id = &self.id;
-        debug!("[Room {id}] Sending event {:?}", event);
         match self.event_sender.send(event) {
             Ok(count) => {
                 debug!("[Room {id}] Event sent to {count} listeners");
@@ -480,7 +473,7 @@ impl Room {
     pub async fn remove_track(&self, id: String) {
         self.close_track(&id);
 
-        self.send_message(RoomEvent::TracksRemoved {
+        self.send_to_subscribers(RoomEvent::TracksRemoved {
             removed_tracks: vec![id],
             room_id: self.id.clone(),
         })
@@ -489,7 +482,7 @@ impl Room {
 
     pub async fn publish_track(
         &self,
-        router: Arc<LocalRouter>,
+        router: &LocalRouter,
         receiver: Arc<WebRTCReceiver>,
     ) {
         for peer in self.peers.iter() {
@@ -542,13 +535,12 @@ impl Room {
         // Router stops when peers are closed
     }
 
-    /// Send a serializable message to all peers' subscribers
-    pub async fn send_message<Message>(&self, msg: Message)
+    /// Sends a serializable message to all peers' subscribers
+    pub async fn send_to_subscribers<Message>(&self, msg: Message)
     where
         Message: Serialize + Debug,
     {
         if let Ok(payload) = serde_json::to_string(&msg) {
-            info!("[Room {}] Sending room event: {}", self.id, payload);
             for peer in self.peers.iter() {
                 match peer.subscriber().await {
                     Some(subscriber) => {
