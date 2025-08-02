@@ -10,15 +10,16 @@ use error::Result;
 
 use bucket::Bucket;
 use nack::NackQueue;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::time::Instant;
 use webrtc::rtp::extension::transport_cc_extension::TransportCcExtension;
 
 use async_trait::async_trait;
-use std::collections::VecDeque;
 use std::future::Future;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::{Duration};
 use std::{pin::Pin, sync::Arc};
-use tokio::sync::{broadcast, Mutex};
-use tokio::time::{Duration, sleep};
+use tokio::sync::{Mutex, broadcast};
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 use webrtc::rtp::extension::audio_level_extension::AudioLevelExtension;
@@ -32,12 +33,12 @@ use webrtc::rtp_transceiver as rtp;
 
 const INITIAL_PACKET_PROBE_COUNT: u8 = 25;
 const MAX_SEQUENCE_NUMBER: u32 = 1 << 16;
-const REPORT_DELTA: f64 = 1e9;
+const REPORT_DELTA: u128 = 1_000_000_000;
 
 pub type OnCloseFn =
     Box<dyn (FnMut() -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>) + Send + Sync>;
 pub type OnTransportWideCCFn = Box<
-    dyn (FnMut(u16, u32, bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync,
+    dyn (FnMut(u16, Duration, bool) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync,
 >;
 pub type OnFeedbackCallBackFn = Box<
     dyn (FnMut(
@@ -78,17 +79,17 @@ pub struct VP8 {
     pub is_key_frame: bool,
 }
 
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 struct PendingPackets {
-    arrival_time: u32,
+    arrival_instant: Instant,
     pub packet: Packet,
 }
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub struct ExtPacket {
     pub head: bool,
     cycle: u32,
-    /// The arrival time of the packet (in nanoseconds).
-    pub arrival: u32,
+    /// Relative arrival time since a reference instant (e.g. [AtomicBuffer::start_time])
+    pub arrival: Duration,
     pub packet: Packet,
     pub key_frame: bool,
     pub payload: VP8,
@@ -109,40 +110,32 @@ pub struct Options {
     pub max_bitrate: u64,
 }
 
-#[derive(Default, Clone)]
 pub struct Buffer {
     bucket: Option<Bucket>,
     nacker: Option<NackQueue>,
 
     codec_type: RTPCodecType,
-    ext_packets: VecDeque<ExtPacket>,
-    pending_packets: Vec<PendingPackets>,
     media_ssrc: u32,
     clock_rate: u32,
     max_bitrate: u64,
-    /// Time when the last packet was reported (in nanoseconds).
-    last_report: u32,
-    twcc_ext: u8,
-    audio_ext: u8,
-    bound: bool,
+    /// Instant when the last packet was reported.
+    last_report: Option<Instant>,
     closed: bool,
     mime: String,
 
     // supported feedbacks
     remb: bool,
     nack: bool,
-    twcc: bool,
-    audio_level: bool,
-
     min_packet_probe: u8,
-    last_packet_read: i32,
-
     pub max_temporal_layer: i32,
     pub bitrate: u64,
     bitrate_helper: u64,
+    /// Last sender report NTP timestamp
     last_srntp_time: u64,
+    /// Last sender report RTP timestamp
     last_srrtp_time: u32,
-    last_sr_recv: i64, // Represents wall clock of the most recent sender report arrival
+    /// Subsecond nanos when the last sender report arrived
+    last_sr_recv: i64,
     /// The lowest sequence number received in packet probe.
     base_sn: u16,
     cycles: u32,
@@ -150,7 +143,7 @@ pub struct Buffer {
     last_rtcp_packet_time: i64, // Time the last RTCP packet was received.
     #[allow(dead_code)]
     last_rtcp_sr_time: i64, // Time the last RTCP SR was received. Required for DLSR computation.
-    /// The latest transit time.
+    /// The latest transit time (ticks).
     last_transit: f64,
     /// The highest sequence number received.
     max_seq_no: u16,
@@ -162,16 +155,11 @@ pub struct Buffer {
     /// The latest timestamp received on a packet marked as head.
     /// When there is no head, you should mark as head the first frame incoming every second.
     latest_head_timestamp: u32,
-    /// Subsecond timestamp when the latest timestamp was received.
-    latest_timestamp_nanos: u32,
+    /// Instant when last packet has arrived.
+    last_arrival: Option<Instant>,
 
     video_pool_len: usize,
     audio_pool_len: usize,
-    //callbacks
-    //on_close_handler: Arc<Mutex<Option<OnCloseFn>>>,
-    on_transport_wide_cc_handler: Arc<Mutex<Option<OnTransportWideCCFn>>>,
-    on_feedback_callback_handler: Arc<Mutex<Option<OnFeedbackCallBackFn>>>,
-    on_audio_level: Arc<Mutex<Option<OnAudioLevelFn>>>,
 }
 
 impl Buffer {
@@ -180,20 +168,174 @@ impl Buffer {
             media_ssrc: ssrc,
             video_pool_len: 1500 * 500,
             audio_pool_len: 1500 * 25,
-            ..Default::default()
+            bucket: Default::default(),
+            nacker: Default::default(),
+            codec_type: Default::default(),
+            //pending_packets: Default::default(),
+            clock_rate: Default::default(),
+            max_bitrate: Default::default(),
+            last_report: Default::default(),
+            //twcc_ext: Default::default(),
+            //audio_ext: Default::default(),
+            //bound: Default::default(),
+            closed: Default::default(),
+            mime: Default::default(),
+            remb: Default::default(),
+            nack: Default::default(),
+            //twcc: Default::default(),
+            //audio_level: Default::default(),
+            min_packet_probe: Default::default(),
+            //last_packet_read: Default::default(),
+            max_temporal_layer: Default::default(),
+            bitrate: Default::default(),
+            bitrate_helper: Default::default(),
+            last_srntp_time: Default::default(),
+            last_srrtp_time: Default::default(),
+            last_sr_recv: Default::default(),
+            base_sn: Default::default(),
+            cycles: Default::default(),
+            last_rtcp_packet_time: Default::default(),
+            last_rtcp_sr_time: Default::default(),
+            last_transit: Default::default(),
+            max_seq_no: Default::default(),
+            stats: Default::default(),
+            latest_timestamp: Default::default(),
+            latest_head_timestamp: Default::default(),
+            last_arrival: Default::default(),
         }
     }
 
+    /// Updates this buffer with the given packet and its arrival time.
+    /// The packet is added to the bucket and returned as [ExtPacket].
+    /// # Responsabilites
+    /// - NACK calculation
+    /// - Buffer stats
+    /// - Store ExtPackets
+    /// - Calculate jitter
+    /// - Call twcc, audio level, and feedback nack handlers
+    /// - Calculate bitrate
+    pub fn process_rtp_packet(&mut self, packet: Packet, now: Instant, arrival_time: Duration) -> ExtPacket {
+        let sn = packet.header.sequence_number;
+        self.calculate_nack(sn, now);
+
+        let pkt = &packet.payload;
+        let max_seq_no = self.max_seq_no;
+        if let Some(bucket) = self.bucket.as_mut() {
+            if let Err(err) = bucket.add_packet(pkt, sn, sn == max_seq_no) {
+                warn!("Packet #{sn} content not added: {err}");
+            }
+        }
+
+        // Better safe (wrapping) than sorry (overflow)
+        self.stats.total_byte = self.stats.total_byte.wrapping_add(pkt.len() as u64);
+        self.bitrate_helper = self.bitrate_helper.wrapping_add(pkt.len() as u64);
+        self.stats.packet_count = self.stats.packet_count.wrapping_add(1);
+
+        self.last_arrival = Some(now);
+        
+        let mut ep = ExtPacket {
+            cycle: self.cycles,
+            packet: packet.clone(),
+            arrival: arrival_time,
+            key_frame: false,
+            ..Default::default()
+        };
+
+        match self.codec_type {
+            RTPCodecType::Audio => {
+                let mut head = packet.header.marker;
+                let pkt_ts = packet.header.timestamp;
+                // Set initial timestamp for first packet
+                if self.stats.packet_count == 1 {
+                    head = true;
+                    self.latest_head_timestamp = pkt_ts;
+                }
+                if self.latest_head_timestamp.wrapping_add(self.clock_rate) < pkt_ts {
+                    self.latest_head_timestamp = pkt_ts;
+                    head = true;
+                }
+                ep.head = head;
+            }
+            _ => {
+                // TODO: Head for video codecs (if not implemented)
+            }
+        }
+
+        match self.mime.as_str() {
+            "video/vp8" => {
+                let mut vp8_packet = VP8::default();
+                if let Err(e) = vp8_packet.unmarshal(&packet.payload[..]) {
+                    match e {
+                        BufferError::ErrNilPacket => {}
+                        _ => warn!("Error parsing VP8 packet: {e}"),
+                    }
+                }
+                ep.key_frame = vp8_packet.is_key_frame;
+                ep.payload = vp8_packet;
+            }
+            "video/h264" => {
+                ep.key_frame = is_h264_keyframe(&packet.payload[..]);
+            }
+            mime => {
+                if mime.starts_with("video/") {
+                    debug!("Unsupported MIME type: {mime}. Ignored.");
+                }
+            }
+        }
+
+        if self.min_packet_probe < INITIAL_PACKET_PROBE_COUNT {
+            if sn < self.base_sn {
+                self.base_sn = sn
+            }
+
+            if self.mime == "video/vp8" {
+                let pld = ep.payload;
+                let mtl = self.max_temporal_layer;
+                if mtl < pld.tid as i32 {
+                    self.max_temporal_layer = pld.tid as i32;
+                }
+            }
+
+            self.min_packet_probe += 1;
+        }
+
+        self.update_timestamp(packet.header.timestamp, now);
+
+        // Ticks measure from arrival time until jitter calculation
+        let delta = arrival_time.as_secs_f64() * self.clock_rate as f64;
+        let transit = delta - packet.header.timestamp as f64;
+        self.calculate_jitter(transit);
+
+        let delta = match self.last_report {
+            Some(last) => last.duration_since(now).as_nanos(),
+            _ => 0,
+        };
+
+        if delta >= REPORT_DELTA {
+            let br = 8 * self.bitrate_helper * REPORT_DELTA as u64 / delta as u64;
+            self.bitrate = br;
+            self.last_report = Some(Instant::now());
+            self.bitrate_helper = 0;
+        }
+        
+        if self.last_report.is_none() {
+            self.last_report = Some(Instant::now());
+        } 
+
+        ep
+    }
+
     /// # Responsabilities
-    /// - Update SN, max SN and last report
+    /// - Update max SN
+    /// - Set base SN and last report instant if the first packet arrives
     /// - Add missing sequence numbers to nack queue
     /// - Remove old missing sequence numbers from nack queue
-    fn calculate_nack(&mut self, sn: u16, arrival_time: u32) {
+    fn calculate_nack(&mut self, sn: u16, now: Instant) {
         let distance = bucket::distance(sn, self.max_seq_no);
         if self.stats.packet_count == 0 {
             self.base_sn = sn;
             self.max_seq_no = sn;
-            self.last_report = arrival_time;
+            self.last_report = Some(now);
         }
         // new SN
         else if distance & 0x8000 == 0 {
@@ -239,17 +381,17 @@ impl Buffer {
     }
 
     /// Build RTCP feedback packets (NACK and PLI) based on detected loss.
-    /// 
-    /// # Returns 
+    ///
+    /// # Returns
     /// - RTCP packets vector ready to be sent (may be empty)
-    async fn build_feedback_packets(&mut self) -> Vec<Box<dyn RtcpPacket + Send + Sync>> {
+    fn build_feedback_packets(&mut self) -> Vec<Box<dyn RtcpPacket + Send + Sync>> {
         match self.nacker.as_mut() {
             Some(nacker) => {
                 let seq_number = self.cycles | self.max_seq_no as u32;
                 let (nacks, ask_key_frame) = nacker.pairs(seq_number);
 
                 let mut pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> = Vec::default();
-        
+
                 // Add NACKs
                 if let Some(nacks) = nacks {
                     if !nacks.is_empty() {
@@ -272,12 +414,12 @@ impl Buffer {
                 }
 
                 pkts
-            },
+            }
             None => Vec::default(),
         }
     }
 
-    /// Calculates and updates jitter for the given transit time.
+    /// Calculates and updates jitter for the given transit time (in ticks).
     fn calculate_jitter(&mut self, transit: f64) {
         if self.last_transit != 0.0 {
             let d = (transit - self.last_transit).abs();
@@ -285,80 +427,124 @@ impl Buffer {
         }
         self.last_transit = transit;
     }
+
+    /// Updates latest timestamp based on reported timestamp and time in nanoseconds when the packet arrived.
+    fn update_timestamp(&mut self, rtp_timestamp: u32, arrival_instant: Instant) {
+        // if first time update or the timestamp is later (factoring timestamp wrap around)
+        let latest_timestamp = self.latest_timestamp;
+        if is_later_timestamp(rtp_timestamp, latest_timestamp) {
+            self.latest_timestamp = rtp_timestamp;
+            self.last_arrival = Some(arrival_instant);
+        }
+    }
 }
 
 pub struct AtomicBuffer {
+    audio_ext: AtomicU8,
+    audio_level: AtomicBool,
+    bound: AtomicBool,
     buffer: Arc<Mutex<Buffer>>,
     close_sender: broadcast::Sender<()>,
     pub close_rx: Arc<Mutex<broadcast::Receiver<()>>>,
+    on_transport_wide_cc_handler: Arc<Mutex<Option<OnTransportWideCCFn>>>,
+    on_feedback_callback_handler: Arc<Mutex<Option<OnFeedbackCallBackFn>>>,
+    on_audio_level: Arc<Mutex<Option<OnAudioLevelFn>>>,
+    pending_packets: Mutex<Vec<PendingPackets>>,
+    packet_tx: UnboundedSender<ExtPacket>,
+    pub packet_rx: Arc<Mutex<UnboundedReceiver<ExtPacket>>>,
+    twcc: AtomicBool,
+    twcc_ext: AtomicU8,
+    pub start_time: Instant,
 }
 
 #[async_trait]
 impl BufferIO for AtomicBuffer {
     /// Adds a RTP Packet, out of order, new packet may be arrived later
     async fn write(&self, pkt: Packet) {
+        let arrival_instant = Instant::now();
+        if !self.bound.load(Ordering::Acquire) {
+            let mut pending = self.pending_packets.lock().await;
+            pending.push(PendingPackets {
+                arrival_instant,
+                packet: pkt,
+            });
+
+            return;
+        }
+
+        let arrival_time = arrival_instant.duration_since(self.start_time);
         {
             let mut buffer = self.buffer.lock().await;
+            let ext_packet = buffer.process_rtp_packet(pkt.clone(), arrival_instant, arrival_time);
+            if let Err(err) = self.packet_tx.send(ext_packet) {
+                warn!("write -> Send packet failed: {err}");
+            };
 
-            if !buffer.bound {
-                buffer.pending_packets.push(PendingPackets {
-                    arrival_time: Instant::now().elapsed().subsec_nanos(),
-                    packet: pkt.clone(),
+            if buffer.nacker.is_some() {
+                let fb_packets = buffer.build_feedback_packets();
+                let fb_handler = self.on_feedback_callback_handler.clone();
+                tokio::spawn(async move {
+                    let mut handler = fb_handler.lock().await;
+                    if let Some(f) = &mut *handler {
+                        f(fb_packets).await;
+                    }
                 });
+            }
 
-                return;
+        }
+
+        if self.twcc.load(Ordering::Acquire) {
+            if let Some(ext) = pkt
+                .header
+                .get_extension(self.twcc_ext.load(Ordering::Acquire))
+            {
+                match TransportCcExtension::unmarshal(&mut &ext[..]) {
+                    Ok(data) => {
+                        let twcc_handler = self.on_transport_wide_cc_handler.clone();
+                        tokio::spawn(async move {
+                            let mut handler = twcc_handler.lock().await;
+                            if let Some(f) = handler.as_mut() {
+                                f(data.transport_sequence, arrival_time, pkt.header.marker).await;
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        error!("Error parsing transport wide cc extension: {err}");
+                    }
+                };
             }
         }
 
-        self.calc(pkt, Instant::now().elapsed().subsec_nanos())
-            .await;
+        if self.audio_level.load(Ordering::Acquire) {
+            if let Some(ext) = pkt
+                .header
+                .get_extension(self.audio_ext.load(Ordering::Acquire))
+            {
+                if let Ok(data) = AudioLevelExtension::unmarshal(&mut &ext[..]) {
+                    let audio_level_handler = self.on_audio_level.clone();
+                    tokio::spawn(async move {
+                        let mut handler = audio_level_handler.lock().await;
+                        if let Some(f) = handler.as_mut() {
+                            f(data.voice, data.level).await;
+                        }
+                    });
+                }
+            }
+        }
     }
 
+    #[warn(unused)]
     async fn read(&mut self) -> Result<Packet> {
-        let buffer = self.buffer.lock().await;
-        if buffer.closed {
-            return Err(BufferError::ErrIOEof);
-        }
-
-        if buffer.pending_packets.len() > buffer.last_packet_read as usize {
-            /*
-            if buff.len()
-                < buffer
-                    .pending_packets
-                    .get(buffer.last_packet_read as usize)
-                    .unwrap()
-                    .packet.
-            {
-                return Err(BufferError::ErrBufferTooSmall);
-            }*/
-
-            let packet = &buffer
-                .pending_packets
-                .get(buffer.last_packet_read as usize)
-                .unwrap()
-                .packet;
-
-            //n = packet.len();
-
-            //buff.copy_from_slice(&packet[..]);
-            return Ok(packet.clone());
-        }
-
-        Err(BufferError::ErrNilPacket)
+        Err(BufferError::ErrPacketNotFound)
     }
 
     async fn close(&self) -> Result<()> {
         //let buffer = self.buffer.lock().await;
         //if buffer.bucket.is_some() && buffer.codec_type == RTPCodecType::Video {}
-        let buf = self.buffer.lock().await;
-            if !buf.ext_packets.is_empty() {
-                warn!("{} pending packets will be lost", buf.ext_packets.len());
-            }
-            
-            if let Err(_) = self.close_sender.send(()) {
-                warn!("close_rx dropped");
-            };
-        
+        if let Err(_) = self.close_sender.send(()) {
+            warn!("close_rx dropped");
+        };
+
         Ok(())
     }
 }
@@ -366,10 +552,23 @@ impl BufferIO for AtomicBuffer {
 impl AtomicBuffer {
     pub fn new(ssrc: u32) -> Self {
         let (s, r) = broadcast::channel::<()>(1);
+        let (pkt_s, pkt_r) = unbounded_channel::<ExtPacket>();
         Self {
+            audio_ext: Default::default(),
+            audio_level: Default::default(),
+            bound: Default::default(),
             buffer: Arc::new(Mutex::new(Buffer::new(ssrc))),
+            pending_packets: Default::default(),
             close_sender: s,
             close_rx: Arc::new(Mutex::new(r)),
+            start_time: Instant::now(),
+            packet_tx: pkt_s,
+            packet_rx: Arc::new(Mutex::new(pkt_r)),
+            on_audio_level: Default::default(),
+            on_feedback_callback_handler: Default::default(),
+            on_transport_wide_cc_handler: Default::default(),
+            twcc: Default::default(),
+            twcc_ext: Default::default(),
         }
     }
 
@@ -393,7 +592,7 @@ impl AtomicBuffer {
 
         for ext in &params.header_extensions {
             if ext.uri == extmap::TRANSPORT_CC_URI {
-                buffer.twcc_ext = ext.id as u8;
+                self.twcc_ext.store(ext.id as u8, Ordering::Release);
                 break;
             }
         }
@@ -406,7 +605,7 @@ impl AtomicBuffer {
                             buffer.remb = true;
                         }
                         rtp::TYPE_RTCP_FB_TRANSPORT_CC => {
-                            buffer.twcc = true;
+                            self.twcc.store(true, Ordering::Release);
                         }
                         rtp::TYPE_RTCP_FB_NACK => {
                             buffer.nack = true;
@@ -419,8 +618,8 @@ impl AtomicBuffer {
             RTPCodecType::Audio => {
                 for ext in &params.header_extensions {
                     if ext.uri == extmap::AUDIO_LEVEL_URI {
-                        buffer.audio_level = true;
-                        buffer.audio_ext = ext.id as u8;
+                        self.audio_level.store(true, Ordering::Release);
+                        self.audio_ext.store(ext.id as u8, Ordering::Release);
                     }
                 }
             }
@@ -428,179 +627,22 @@ impl AtomicBuffer {
             _ => {}
         }
 
-        debug!(
-            "bind -> Processing {} packets",
-            buffer.pending_packets.len()
-        );
-        for pp in buffer.pending_packets.clone() {
-            self.calc(pp.packet, pp.arrival_time).await;
-        }
-        debug!("bind -> Binding done");
+        let mut pending = self.pending_packets.lock().await;
 
-        buffer.pending_packets.clear();
-        buffer.bound = true;
+        debug!("bind -> Processing {} packets", pending.len());
+
+        for pp in pending.drain(..) {
+            let arrival_time = pp.arrival_instant.duration_since(self.start_time);
+            let ext_packet = buffer.process_rtp_packet(pp.packet, pp.arrival_instant, arrival_time);
+            if let Err(err) = self.packet_tx.send(ext_packet) {
+                warn!("bind -> Send packet failed: {err}")
+            };
+        }
+        self.bound.store(true, Ordering::Release);
     }
 
     pub async fn bitrate(&self) -> u64 {
         self.buffer.lock().await.bitrate
-    }
-
-    /// Updates the buffer with the given packet and its arrival time.
-    /// The packet is added to the bucket. An [ExtPacket] is created and inserted into the packet queue.
-    /// # Responsabilites
-    /// - NACK calculation
-    /// - Buffer stats
-    /// - Store ExtPackets
-    /// - Calculate jitter
-    /// - Call twcc, audio level, and feedback nack handlers
-    /// - Calculate bitrate
-    pub async fn calc(&self, packet: Packet, arrival_time: u32) {
-        let mut buffer = self.buffer.lock().await;
-        let sn = packet.header.sequence_number;
-        buffer.calculate_nack(sn, arrival_time);
-
-        let pkt = &packet.payload;
-        let max_seq_no = buffer.max_seq_no;
-        if let Some(bucket) = buffer.bucket.as_mut() {
-            if let Err(err) = bucket.add_packet(pkt, sn, sn == max_seq_no) {
-                warn!("Packet #{sn} content not added: {err}");
-            }
-        }
-
-        // Better safe (wrapping) than sorry (overflow)
-        buffer.stats.total_byte = buffer.stats.total_byte.wrapping_add(pkt.len() as u64);
-        buffer.bitrate_helper = buffer.bitrate_helper.wrapping_add(pkt.len() as u64);
-        buffer.stats.packet_count = buffer.stats.packet_count.wrapping_add(1);
-
-        let mut ep = ExtPacket {
-            cycle: buffer.cycles,
-            packet: packet.clone(),
-            arrival: arrival_time,
-            key_frame: false,
-            ..Default::default()
-        };
-
-        match buffer.codec_type {
-            RTPCodecType::Audio => {
-                let mut head = packet.header.marker;
-                let pkt_ts = packet.header.timestamp;
-                // Set initial timestamp for first packet
-                if buffer.stats.packet_count == 1 {
-                    head = true;
-                    buffer.latest_head_timestamp = pkt_ts;
-                }
-                if buffer.latest_head_timestamp.wrapping_add(buffer.clock_rate) < pkt_ts {
-                    buffer.latest_head_timestamp = pkt_ts;
-                    head = true;
-                }
-                ep.head = head;
-            }
-            _ => {
-                // TODO: Head for video codecs (if not implemented)
-            }
-        }
-
-        match buffer.mime.as_str() {
-            "video/vp8" => {
-                let mut vp8_packet = VP8::default();
-                if let Err(e) = vp8_packet.unmarshal(&packet.payload[..]) {
-                    match e {
-                        BufferError::ErrNilPacket => {}
-                        _ => warn!("Error parsing VP8 packet: {e}"),
-                    }
-                }
-                ep.key_frame = vp8_packet.is_key_frame;
-                ep.payload = vp8_packet;
-            }
-            "video/h264" => {
-                ep.key_frame = is_h264_keyframe(&packet.payload[..]);
-            }
-            mime => {
-                if mime.starts_with("video/") {
-                    debug!("Unsupported MIME type: {mime}. Ignored.");
-                }
-            }
-        }
-
-        if buffer.min_packet_probe < INITIAL_PACKET_PROBE_COUNT {
-            if sn < buffer.base_sn {
-                buffer.base_sn = sn
-            }
-
-            if buffer.mime == "video/vp8" {
-                let pld = ep.payload;
-                let mtl = buffer.max_temporal_layer;
-                if mtl < pld.tid as i32 {
-                    buffer.max_temporal_layer = pld.tid as i32;
-                }
-            }
-
-            buffer.min_packet_probe += 1;
-        }
-
-        buffer.ext_packets.push_back(ep);
-
-        // if first time update or the timestamp is later (factoring timestamp wrap around)
-        let latest_timestamp = buffer.latest_timestamp;
-        let subsec_nanos = buffer.latest_timestamp_nanos;
-        if (subsec_nanos == 0) || is_later_timestamp(packet.header.timestamp, latest_timestamp) {
-            buffer.latest_timestamp = packet.header.timestamp;
-            buffer.latest_timestamp_nanos = arrival_time;
-        }
-
-        let arrival = arrival_time as f64 / 1e6 * (buffer.clock_rate as f64 / 1e3);
-        let transit = arrival - packet.header.timestamp as f64;
-        buffer.calculate_jitter(transit);
-
-        if buffer.twcc {
-            if let Some(ext) = packet.header.get_extension(buffer.twcc_ext) {
-                match TransportCcExtension::unmarshal(&mut &ext[..]) {
-                    Ok(data) => {
-                        let mut handler = buffer.on_transport_wide_cc_handler.lock().await;
-                        if let Some(f) = &mut *handler {
-                            f(data.transport_sequence, arrival_time, packet.header.marker).await;
-                        }
-                    }
-                    Err(err) => {
-                        error!("Error parsing transport wide cc extension: {err}");
-                    }
-                };
-            }
-        }
-
-        if buffer.audio_level {
-            if let Some(ext) = packet.header.get_extension(buffer.audio_ext) {
-                let rv = AudioLevelExtension::unmarshal(&mut &ext[..]);
-
-                if let Ok(data) = rv {
-                    let mut handler = buffer.on_audio_level.lock().await;
-                    if let Some(f) = &mut *handler {
-                        f(data.voice, data.level).await;
-                    }
-                }
-            }
-        }
-
-        let diff = arrival_time.saturating_sub(buffer.last_report);
-
-        if buffer.nacker.is_some() {
-            let rv = buffer.build_feedback_packets().await;
-            let mut handler = buffer.on_feedback_callback_handler.lock().await;
-            if let Some(f) = &mut *handler {
-                f(rv).await;
-            }
-        }
-
-        if diff >= REPORT_DELTA as u32 {
-            if diff > 0 {
-                let br = 8 * buffer.bitrate_helper * REPORT_DELTA as u64 / diff as u64;
-                buffer.bitrate = br;
-            } else {
-                warn!("Attemped to divide by zero. Skipped bitrate.");
-            }
-            buffer.last_report = arrival_time;
-            buffer.bitrate_helper = 0;
-        }
     }
 
     pub async fn get_packet(&self, buff: &mut [u8], sn: u16) -> Result<usize> {
@@ -634,32 +676,13 @@ impl AtomicBuffer {
         self.buffer.lock().await.max_temporal_layer
     }
 
-    /// Loops until find the first ext packet in buffer and returns it.
-    pub async fn read_extended(&self) -> Result<ExtPacket> {
-        loop {
-            if self.buffer.lock().await.closed {
-                return Err(BufferError::ErrIOEof);
-            }
-
-            let ext_packets = &mut self.buffer.lock().await.ext_packets;
-            if !ext_packets.is_empty() {
-                if let Some(pkt) = ext_packets.pop_front() {
-                    return Ok(pkt);
-                };
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-
     pub async fn register_on_audio_level(&self, f: OnAudioLevelFn) {
-        let buffer = self.buffer.lock().await;
-        let mut handler = buffer.on_audio_level.lock().await;
+        let mut handler = self.on_audio_level.lock().await;
         *handler = Some(f);
     }
 
     pub async fn register_on_feedback(&self, f: OnFeedbackCallBackFn) {
-        let buffer = self.buffer.lock().await;
-        let mut handler = buffer.on_feedback_callback_handler.lock().await;
+        let mut handler = self.on_feedback_callback_handler.lock().await;
         *handler = Some(f);
     }
 

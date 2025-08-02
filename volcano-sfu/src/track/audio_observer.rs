@@ -1,5 +1,6 @@
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::{sync::Arc};
+
+use dashmap::{DashMap, DashSet};
 
 #[derive(Default, Clone, Debug)]
 struct AudioStream {
@@ -47,14 +48,14 @@ struct AudioStream {
 /// ```
 #[derive(Default, Clone, Debug)]
 pub struct AudioObserver {
-    streams: Arc<Mutex<Vec<AudioStream>>>,
+    streams: DashMap<String, AudioStream>,
     /// Expected **total audio power** an audio stream should have to be considered active.
     pub expected: i32,
     /// In each observation interval, if the audio level is lower than `threshold`, audio power is accumulated.
     pub threshold: u8,
     /// Interval in milliseconds between each calculation of audio activity.
     pub interval: i32,
-    previous: Vec<String>,
+    previous: Arc<DashSet<String>>,
 }
 
 impl AudioObserver {
@@ -71,29 +72,23 @@ impl AudioObserver {
         }
     }
 
-    pub async fn add_stream(&mut self, stream_id: String) {
-        self.streams.lock().await.push(AudioStream {
+    pub async fn add_stream(&self, stream_id: String) {
+        self.streams.insert(stream_id.clone(), AudioStream {
             id: stream_id,
             ..Default::default()
-        })
+        });
     }
 
     pub async fn remove_stream(&self, stream_id: &str) {
         debug!("Remove stream {}", stream_id);
-        let mut streams = self.streams.lock().await;
-        streams.retain(|stream| !stream.id.eq(stream_id));
+        self.streams.remove(stream_id);
     }
 
     /// Observes whether `d_bov` is higher than threshold for target stream, then it should be ignored.
     /// 
     /// If `d_bov` is lower or equal than treshold, it sums `d_bov` into target stream.
     pub async fn observe(&self, stream_id: &str, d_bov: u8) {
-        let mut streams = self.streams.lock().await;
-        
-        let target = streams.iter_mut()
-            .find(|stream| stream.id.eq(stream_id));
-        
-        if let Some(stream) = target {
+        if let Some(mut stream) = self.streams.get_mut(stream_id) {
             // Active voice level should be lower than threshold
             if d_bov <= self.threshold {
                 stream.sum += d_bov as i32;
@@ -108,18 +103,11 @@ impl AudioObserver {
     /// # Returns
     /// Vector of stream ids from selected streams, or None if the vector could be empty.
     pub async fn calc(&mut self) -> Option<Vec<String>> {
-        let mut streams = self.streams.lock().await;
-
-        streams.sort_by(|a, b| {
-            if b.total != a.total {
-                return b.total.cmp(&a.total);
-            }
-            b.sum.cmp(&a.sum)
-        });
+        let current_ids = Arc::new(self.streams.iter().map(|s| s.key().clone()).collect::<DashSet<_>>());
 
         let mut stream_ids = Vec::new();
 
-        for stream in streams.iter_mut() {
+        for mut stream in self.streams.iter_mut() {
             if stream.total >= self.expected {
                 debug!("[stream {}] {}/{} (acceptable)", stream.id, stream.total, self.expected);
                 stream_ids.push(stream.id.clone());
@@ -129,25 +117,18 @@ impl AudioObserver {
             stream.sum = 0;
         }
 
-        if self.previous.len() == stream_ids.len() {
-            for idx in 0..self.previous.len() {
-                // If any stream id is different, reset the previous vector.
-                if self.previous[idx] != stream_ids[idx] {
-                    self.previous = stream_ids.clone();
-
-                    return Some(stream_ids);
-                }
-            }
-            // If all stream ids are the same, do not reset the previous vector.
+        if current_ids.len() == self.previous.len() &&
+            self.previous.iter().all(|k| current_ids.contains(k.key())) {
             return None;
         }
-        self.previous = stream_ids.clone();
+
+        let _ = std::mem::replace(&mut self.previous, current_ids);
 
         Some(stream_ids)
     }
 
     /// Returns true if there are no streams.
     pub async fn is_empty(&self) -> bool {
-        self.streams.lock().await.is_empty()
+        self.streams.is_empty()
     }
 }

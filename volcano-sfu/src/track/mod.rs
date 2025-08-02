@@ -22,7 +22,7 @@ pub mod router;
 /// temporal changes in the SFU.
 /// VP8 temporal layers implemented according https://tools.ietf.org/html/rfc7741
 pub async fn set_vp8_temporal_layer(
-    ext_packet: ExtPacket,
+    ext_packet: &ExtPacket,
     d: &DownTrack,
 ) -> (Bytes, u16, u8, bool) {
     let pkt = ext_packet.payload;

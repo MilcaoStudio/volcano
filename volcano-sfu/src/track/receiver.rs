@@ -19,7 +19,6 @@ use webrtc::track::track_remote::TrackRemote;
 use webrtc::util::Unmarshal;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 
-use crate::buffer::error::BufferError;
 use crate::buffer::{AtomicBuffer, VP8};
 use crate::track::sequencer::AtomicSequencer;
 
@@ -680,10 +679,12 @@ impl Receiver for WebRTCReceiver {
             if let Some(buffer) = &self.buffers.lock().await[layer] {
                 interval.tick().await;
                 let mut close = buffer.close_rx.lock().await;
+                let mut packet_read = buffer.packet_rx.lock().await;
                 tokio::select! {
-                    read = buffer.read_extended() => {
+                    read = packet_read.recv() => {
                         match read {
-                            Ok(pkt) => {
+                            Some(pkt) => {
+                                trace!("RTP packet received (arrival {})", pkt.arrival.as_secs_f64());
                                 if self.is_simulcast && self.pending[layer].load(Ordering::Relaxed) {
                                     debug!("Reading packet on layer {layer} in simulcast receiver");
                                     if pkt.key_frame {
@@ -731,7 +732,7 @@ impl Receiver for WebRTCReceiver {
                                     let dts = self.down_tracks[layer].lock().await;
                                     
                                     for dt in &*dts {
-                                        if let Err(Error::ErrWebRTC(e)) = dt.forward_rtp(pkt.clone(), layer).await
+                                        if let Err(Error::ErrWebRTC(e)) = dt.forward_rtp(&pkt, layer).await
                                         {
                                             match e {
                                                 RTCError::ErrClosedPipe
@@ -762,13 +763,8 @@ impl Receiver for WebRTCReceiver {
                                     };
                                 }
                             }
-                            Err(e) => match e {
-                                BufferError::ErrIOEof => {
-                                    error!("read_extended -> Buffer EOF");
-                                }
-                                _ => {
-                                    error!("read_extended -> {e}");
-                                }
+                            _ => {
+                                warn!("[Receiver {}] Extended packet receiver closed.", self.peer_id);
                             },
                         }
                     }

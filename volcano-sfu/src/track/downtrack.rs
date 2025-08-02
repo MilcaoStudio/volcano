@@ -3,7 +3,7 @@ use bytes::Bytes;
 use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -83,13 +83,13 @@ pub struct DownTrackInternal {
     /// Codec capability of the track.
     pub codec: RTCRtpCodecCapability,
     /// Receiver of the track.
-    pub receiver: Arc<WebRTCReceiver>,
+    pub receiver: Weak<WebRTCReceiver>,
     write_stream: Mutex<Option<Arc<dyn TrackLocalWriter + Send + Sync>>>,
     on_bind_handler: Arc<Mutex<Option<OnBindFn>>>,
 }
 
 impl DownTrackInternal {
-    pub(crate) fn new(c: RTCRtpCodecCapability, r: Arc<WebRTCReceiver>, max_track: u32) -> Self {
+    pub(crate) fn new(c: RTCRtpCodecCapability, r: &Arc<WebRTCReceiver>, max_track: u32) -> Self {
         Self {
             codec: c,
             id: r.track_id(),
@@ -105,7 +105,7 @@ impl DownTrackInternal {
             enabled: AtomicBool::default(),
             re_sync: AtomicBool::default(),
             last_ssrc: AtomicU32::default(),
-            receiver: r.clone(),
+            receiver:  Arc::downgrade(r),
             write_stream: Mutex::default(),
             on_bind_handler: Arc::default(),
         }
@@ -156,13 +156,15 @@ impl TrackLocal for DownTrackInternal {
         let receiver = self.receiver.clone();
 
         rtcp.set_on_packets(Box::new(move |pkts| {
-            let sequencer2 = sequencer.clone();
-            let receiver2 = receiver.clone();
+            let sqncr_in = sequencer.clone();
+            let rcvr_in = receiver.clone();
             Box::pin(async move {
-                if enabled {
-                    receiver2.handle_rtcp(pkts, last_ssrc, ssrc_val, sequencer2).await;
-                } else {
-                    trace!("[Track {}] Cannot send RTCP because track is muted.", receiver2.track_id())
+                if let Some(rcvr) = rcvr_in.upgrade() {
+                    if enabled {
+                        rcvr.handle_rtcp(pkts, last_ssrc, ssrc_val, sqncr_in).await;
+                    } else {
+                        trace!("[Track {}] Cannot send RTCP because track is muted.", rcvr.track_id())
+                    }
                 }
             })
         }))
@@ -270,7 +272,7 @@ pub struct DownTrack {
 impl DownTrack {
     pub fn new(
         c: RTCRtpCodecCapability,
-        r: Arc<WebRTCReceiver>,
+        r: &Arc<WebRTCReceiver>,
         peer_id: String,
         max_track: u32,
     ) -> Self {
@@ -493,8 +495,9 @@ impl DownTrack {
                 if csl != self.target_spatial_layer.load(Ordering::Acquire) || csl == target_layer {
                     return Err(Error::FullSpatialLayer(target_layer));
                 }
-                let receiver = &self.down_track_local.receiver;
-                match receiver
+
+                if let Some(receiver) = &self.down_track_local.receiver.upgrade() {
+                    match receiver
                     .switch_down_track(self.clone(), target_layer as usize)
                     .await
                 {
@@ -510,9 +513,9 @@ impl DownTrack {
                             self.id()
                         );
                     }
-                    Err(err) => {
-                        error!("switch_down_track err: {}", err);
-                    }
+                    Err(err) => return Err(err),
+                }
+                
                 }
                 return Ok(());
             }
@@ -588,7 +591,7 @@ impl DownTrack {
     /// # Arguments
     /// - `pkt`: Extended packet.
     /// - `layer`: Layer of the track (ignored for simple tracks).
-    pub async fn forward_rtp(&self, pkt: ExtPacket, layer: usize) -> Result<()> {
+    pub async fn forward_rtp(&self, pkt: &ExtPacket, layer: usize) -> Result<()> {
         if !self.down_track_local.enabled.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -598,9 +601,10 @@ impl DownTrack {
 
         let layer_u8 = (layer & 0xFF) as u8;
 
+        let mut packet = pkt.clone();
         let res = match *self.track_type.lock().await {
-            DownTrackType::SimpleDownTrack => self.forward_simple_rtp(pkt).await,
-            DownTrackType::SimulcastDownTrack => self.forward_simulcast_rtp(pkt, layer_u8).await,
+            DownTrackType::SimpleDownTrack => self.forward_simple_rtp(&mut packet).await,
+            DownTrackType::SimulcastDownTrack => self.forward_simulcast_rtp(&mut packet, layer_u8).await,
         };
 
         let seconds_per_stat = 20;
@@ -621,24 +625,24 @@ impl DownTrack {
         res
     }
 
-    async fn forward_simple_rtp(&self, packet: ExtPacket) -> Result<()> {
-        let mut ext_packet = packet.clone();
+    async fn forward_simple_rtp(&self, ext_packet: &mut ExtPacket) -> Result<()> {
         let ssrc = *self.down_track_local.ssrc.lock().await;
 
         if self.down_track_local.re_sync.load(Ordering::Relaxed) {
             match self.down_track_local.kind() {
                 RTPCodecType::Video => {
                     if !ext_packet.key_frame {
-                        let receiver = &self.down_track_local.receiver;
-                        if !receiver.is_recent_pli() {
-                            let media_ssrc = ext_packet.packet.header.ssrc;
-                            debug!("send PLI, ssrc:{}, media_ssrc:{}", ssrc, media_ssrc);
-                            receiver
-                                .send_rtcp(vec![Box::new(PictureLossIndication {
-                                    sender_ssrc: ssrc,
-                                    media_ssrc,
-                                })])
-                                .await?;
+                        if let Some(receiver) =  &self.down_track_local.receiver.upgrade() {
+                            if !receiver.is_recent_pli() {
+                                let media_ssrc = ext_packet.packet.header.ssrc;
+                                debug!("send PLI, ssrc:{}, media_ssrc:{}", ssrc, media_ssrc);
+                                receiver
+                                    .send_rtcp(vec![Box::new(PictureLossIndication {
+                                        sender_ssrc: ssrc,
+                                        media_ssrc,
+                                    })])
+                                    .await?;
+                            }
                         }
                         return Ok(());
                     }
@@ -740,7 +744,7 @@ impl DownTrack {
         Ok(())
     }
 
-    async fn forward_simulcast_rtp(&self, ext_packet: ExtPacket, layer: u8) -> Result<()> {
+    async fn forward_simulcast_rtp(&self, ext_packet: &mut ExtPacket, layer: u8) -> Result<()> {
         let re_sync = self.down_track_local.re_sync.load(Ordering::Relaxed);
         let csl = self.current_spatial_layer();
 
@@ -752,24 +756,28 @@ impl DownTrack {
 
         let last_ssrc = self.down_track_local.last_ssrc.load(Ordering::Relaxed);
         let temporal_supported: bool;
+        let pkt_arrival_time = ext_packet.arrival.as_millis() as u32; // expected wrap around 1_193 hours
+        trace!("Packet arrival time: {pkt_arrival_time} ms");
 
         {
             let simulcast = &mut self.simulcast.lock().await;
             temporal_supported = simulcast.temporal_supported;
             if last_ssrc != ext_packet.packet.header.ssrc || re_sync {
-                if re_sync && !ext_packet.key_frame {
-                    let receiver = &self.down_track_local.receiver;
-                    receiver
-                        .send_rtcp(vec![Box::new(PictureLossIndication {
-                            sender_ssrc: ssrc,
-                            media_ssrc: ext_packet.packet.header.ssrc,
-                        })])
-                        .await?;
-                    return Ok(());
+
+                if let Some(receiver) = &self.down_track_local.receiver.upgrade() {
+                    if re_sync && !ext_packet.key_frame {
+                        receiver
+                            .send_rtcp(vec![Box::new(PictureLossIndication {
+                                sender_ssrc: ssrc,
+                                media_ssrc: ext_packet.packet.header.ssrc,
+                            })])
+                            .await?;
+                        return Ok(());
+                    }
                 }
 
                 if re_sync && simulcast.l_ts_calc != 0 {
-                    simulcast.l_ts_calc = ext_packet.arrival;
+                    simulcast.l_ts_calc = pkt_arrival_time;
                 }
 
                 if simulcast.temporal_supported {
@@ -791,13 +799,14 @@ impl DownTrack {
                 self.down_track_local
                     .last_ssrc
                     .store(ext_packet.packet.header.ssrc, Ordering::Relaxed);
-                let tdiff = (ext_packet.arrival - simulcast.l_ts_calc) as f64 / 1e6;
-                let mut td = (tdiff as u32 * 90) / 1000;
+                let tdiff = pkt_arrival_time.saturating_sub(simulcast.l_ts_calc); // ms
+                let mut td = (tdiff as u32 * 90) / 1000; // clock cycles
                 if td == 0 {
                     td = 1;
                 }
                 let mut ts_offset = self.ts_offset.lock().await;
                 *ts_offset = ext_packet.packet.header.timestamp - (*self.last_ts.lock().await + td);
+                trace!("New timestamp offset: {ts_offset}");
                 let mut sn_offset = self.sn_offset.lock().await;
                 *sn_offset =
                     ext_packet.packet.header.sequence_number - *self.last_sn.lock().await - 1;
@@ -824,7 +833,7 @@ impl DownTrack {
         if temporal_supported {
             let mime = self.down_track_local.mime.lock().await.clone();
             if mime == *"video/vp8" {
-                let (_a, _b, _c, _d) = set_vp8_temporal_layer(ext_packet.clone(), self).await;
+                let (_a, _b, _c, _d) = set_vp8_temporal_layer(&ext_packet, self).await;
             }
         }
 
@@ -838,12 +847,10 @@ impl DownTrack {
         }
         {
             let simulcast = &mut self.simulcast.lock().await;
-            simulcast.l_ts_calc = ext_packet.arrival;
+            simulcast.l_ts_calc = ext_packet.arrival.as_millis() as u32;
         }
 
-        let mut cur_packet = ext_packet.clone();
-
-        let hdr = &mut cur_packet.packet.header;
+        let hdr = &mut ext_packet.packet.header;
         hdr.sequence_number = new_sn;
         hdr.timestamp = new_ts;
         hdr.ssrc = ssrc;
@@ -853,9 +860,9 @@ impl DownTrack {
         if let Some(write_stream) = &*write_stream_val {
             trace!(
                 "Sending packet to write stream (simulcast) [layer {layer}] {:?}",
-                &cur_packet
+                ext_packet
             );
-            write_stream.write_rtp(&cur_packet.packet).await?;
+            write_stream.write_rtp(&ext_packet.packet).await?;
         } else {
             error!(
                 "[Track {}] No write stream. Packet will be not transmited.",
