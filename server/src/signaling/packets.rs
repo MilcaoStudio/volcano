@@ -54,12 +54,6 @@ pub enum PacketC2S {
         #[serde(default = "Vec::new")]
         room_ids: Vec<String>,
     },
-    /// Tell the server to send tracks
-    Continue {
-        id: u32,
-        /// IDs of tracks the client wants
-        tracks: Vec<String>,
-    },
     /// Peer offers a description to a room
     Join {
         id: u32,
@@ -70,11 +64,6 @@ pub enum PacketC2S {
     },
     /// Removes current user from current room
     Leave,
-    /// Tell the server certain tracks are no longer available
-    Remove {
-        /// IDs of tracks the client is no longer producing
-        removed_tracks: Vec<String>,
-    },
     /// Register candidate in local peer subscriber or publisher
     Trickle {
         candidate: RTCIceCandidateInit,
@@ -98,13 +87,6 @@ pub enum PacketS2C {
         id: u32,
         description: RTCSessionDescription,
     },
-    /// Tell the client certain tracks are no longer available
-    Remove {
-        /// Room emitting event
-        room_id: String,
-        /// IDs of tracks that are no longer being produced
-        removed_tracks: Vec<String>,
-    },
     RoomInfo {
         room: RoomInfo,
     },
@@ -112,37 +94,9 @@ pub enum PacketS2C {
     Offer {
         description: RTCSessionDescription,
     },
-    /// Raw Message
-    Message(String),
-    /// Relay peer request
-    RelayRequest {
-        room_id: String,
-        payload: String,
-    },
-    RoomCreate {
-        id: String,
-        owner: Option<String>,
-    },
-    RoomDelete {
-        id: String,
-    },
     Trickle {
         candidate: RTCIceCandidateInit,
         target: u8,
-    },
-    /// User joined the room
-    UserJoin {
-        /// Room emitting event
-        room_id: String,
-        /// User ID
-        user_id: String,
-    },
-    /// User left the room
-    UserLeft {
-        /// Room emitting event
-        room_id: String,
-        /// ID of leaving user
-        user_id: String,
     },
     /// Disconnection error
     Error {
@@ -159,24 +113,16 @@ pub enum PacketS2C {
 pub enum ServerError {
     #[error("This room ID does not exist.")]
     RoomNotFound,
-    #[error("This track ID does not exist.")]
-    TrackNotFound,
     #[error("Something went wrong trying to authenticate you.")]
     FailedToAuthenticate,
     #[error("Already connected to a room!")]
     AlreadyConnected,
     #[error("Not authenticated in this session.")]
     NotAuthenticated,
-    #[error("Not connected to any room!")]
-    NotConnected,
-    #[error("Media type already has an existing track!")]
-    MediaTypeSatisfied,
     #[error("Peer connection failed!")]
     PeerConnectionFailed,
     #[error("Bad Request. Reason: {reason}")]
     BadRequest { reason: String },
-    #[error("Request type is unknown.")]
-    UnknownRequest,
     #[error("Received message is not a text.")]
     UnproccesableEntity,
 }
