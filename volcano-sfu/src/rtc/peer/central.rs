@@ -114,7 +114,7 @@ impl CentralPeer {
         let codec_capability = receiver.codec().capability;
         let down_track_local = Arc::new(DownTrackInternal::new(
             codec_capability,
-            receiver.clone(),
+            &receiver,
             self.config.router.max_packet_track,
         ));
 
@@ -416,7 +416,7 @@ impl Peer for CentralPeer {
         };
         let router = Arc::new(LocalRouter::new(
             self.id.clone(),
-            room.clone(),
+            Arc::downgrade(&room),
             self.config.router.clone(),
         ));
         {

@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Weak;
 use std::{pin::Pin, sync::Arc};
 
 use dashmap::DashMap;
@@ -61,7 +62,7 @@ pub struct LocalRouter {
     receivers: Arc<DashMap<String, Arc<WebRTCReceiver>>>,
     buffer_factory: Arc<AtomicFactory>,
     rtcp_writer_handler: Arc<Mutex<Option<RtcpWriterFn>>>,
-    room: Arc<Room>,
+    room: Weak<Room>,
     on_add_receiver_track_handler: Arc<Mutex<Option<OnAddReciverTrackFn>>>,
     on_del_receiver_track_handler: Arc<Mutex<Option<OnDelReciverTrackFn>>>,
 }
@@ -72,7 +73,7 @@ impl LocalRouter {
     /// - `id`: Unique identifier of this router.
     /// - `room`: [Room] instance.
     /// - `config`: [RouterConfig] instance.
-    pub fn new(id: String, room: Arc<Room>, config: RouterConfig) -> Self {
+    pub fn new(id: String, room: Weak<Room>, config: RouterConfig) -> Self {
         let (s, r) = mpsc::channel(1024);
         let (sender, _) = broadcast::channel(1);
         let audio_threshold = config.audio_level_threshold;
@@ -166,11 +167,11 @@ impl LocalRouter {
                 },
             ],
         };
-
+        
         // New local down track
         let down_track_local = Arc::new(DownTrackInternal::new(
             codec_capability,
-            receiver.clone(),
+            &receiver,
             self.config.max_packet_track,
         ));
         let transceiver = subscriber
@@ -328,7 +329,7 @@ impl LocalRouter {
     /// - `receiver`: [Receiver] that was created or fetched.
     /// - `published`: Whether the receiver was created or fetched.
     pub async fn add_receiver(
-        self: &Arc<Self>,
+        &self,
         rtp_receiver: Arc<RTCRtpReceiver>,
         track: Arc<TrackRemote>,
         //track_id: String,
@@ -408,13 +409,13 @@ impl LocalRouter {
                                     
                                     // TODO: send stats
                                 }
-                                info!("SourceDescription");
+                                //info!("SourceDescription");
                             }
                             PacketType::SenderReport => {
                                 if let Some(sender_report) =
                                 pkt.as_any().downcast_ref::<SenderReport>()
                                 {
-                                    info!("SenderReport");
+                                    //info!("SenderReport");
                                     buffer_in
                                         .set_sender_report_data(
                                             sender_report.rtp_time,
@@ -513,6 +514,7 @@ impl LocalRouter {
         tokio::spawn(async move {
             // Use mtu size (1460)
             while let Ok((pkt, _)) = track.read_rtp().await {
+                trace!("Write RTP packet");
                 buffer_clone.write(pkt).await;
             }
         });
@@ -571,8 +573,13 @@ impl LocalRouter {
                         };
 
                         if let Some(streams) = streams {
-                            info!("Streams {:?}", streams);
-                            room_out.trigger_event(RoomEvent::VoiceActivity { room_id: room_out.id.clone(), stream_ids: streams });
+                            if let Some(room) = room_out.upgrade() {
+                                room.trigger_event(
+                                    RoomEvent::VoiceActivity { room_id: room.id.clone(), stream_ids: streams }
+                                );
+                            } else {
+                                warn!("Room should have reference in this task");
+                            }
                         }
                     }
                     _ = stop_receiver.recv() => {

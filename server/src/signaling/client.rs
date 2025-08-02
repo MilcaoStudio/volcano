@@ -75,10 +75,10 @@ impl Client {
                         }
                     }
                     Err(e) => match e {
-                        ServerError::UnknownRequest => {
+                        ServerError::BadRequest { reason } => {
                             write
                                 .send(PacketS2C::Error {
-                                    error: e.to_string(),
+                                    error: reason
                                 })
                                 .await?
                         }
@@ -123,10 +123,6 @@ impl Client {
         match packet {
             PacketC2S::Answer { description } => peer.set_remote_description(description).await,
             PacketC2S::Connect { .. } => write.send(PacketS2C::ServerError { error: ServerError::AlreadyConnected }).await,
-            PacketC2S::Continue { .. } => {
-                // TODO: Add Continue event
-                Ok(())
-            }
             PacketC2S::Join {
                 id,
                 room_id,
@@ -139,7 +135,7 @@ impl Client {
                 self.handle_join(write.clone(), room, offer, &cfg, id).await
             }
             PacketC2S::Leave => {
-                match &self.room {
+                match self.room.take() {
                     Some(room) => {
                         // Close all peers
                         room.remove_peer(&self.user.id).await;
@@ -147,14 +143,12 @@ impl Client {
                         room.remove_user(&self.user.id).await;
                         if room.is_empty() {
                             room.close().await;
-                            self.room = None;
                         }
-                        Ok(())
+                        Ok(()) // Drop room
                     }
                     _ => Err(ServerError::RoomNotFound.into()),
                 }
             }
-            PacketC2S::Remove { removed_tracks: _ } => Ok(()),
             PacketC2S::Offer { id, description } => {
                 Self::handle_offer(peer, write.clone(), description, id).await
             }
@@ -276,8 +270,7 @@ impl Client {
         tokio::spawn(async move {
             // Moves room
             while let Ok(event) = event_rx.recv().await {
-                debug!("{:?}", event);
-                // TODO: send event using subscriber data channel
+                room.send_to_subscribers(event).await;
             }
             debug!("Room event sender closed");
         });

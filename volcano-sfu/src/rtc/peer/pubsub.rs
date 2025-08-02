@@ -2,8 +2,7 @@ use anyhow::Result;
 use std::{
     fmt::Debug,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, Ordering}, Arc
     },
 };
 use tokio::sync::Mutex;
@@ -34,19 +33,18 @@ const SUBSCRIBER: u8 = 1;
 /// - [Subscriber] peer subscribes to local tracks and sends them to client's peer connection.
 ///
 /// Suggestion: Despite of this peer implements [Default] trait, it is recommended to use [Self::new] to set an unique ID for this peer.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct PubSubPeer {
     config: Arc<WebRTCTransportConfig>,
     closed: Arc<AtomicBool>,
     id: String,
-    pub room: Arc<Mutex<Option<Arc<Room>>>>,
-    subscriber: Arc<Mutex<Option<Arc<Subscriber>>>>,
+    subscriber: Mutex<Option<Arc<Subscriber>>>,
     user_id: String,
     track_map: Arc<Vec<String>>,
     on_ice_candidate_fn: Arc<Mutex<Option<OnPubSubICECandidateFn>>>,
     on_ice_connection_state_change: Arc<Mutex<Option<OnICEConnectionStateChangeFn>>>,
     on_offer_fn: Arc<Mutex<Option<OnOfferFn>>>,
-    publisher: Arc<Mutex<Option<Arc<Publisher>>>>,
+    publisher: Mutex<Option<Arc<Publisher>>>,
     remote_answer_pending: Arc<AtomicBool>,
     negotiation_pending: Arc<AtomicBool>,
 }
@@ -106,7 +104,7 @@ impl PubSubPeer {
         let id = &self.id;
         info!("[{id}] Join to {} requested", room.id);
 
-        *self.room.lock().await = Some(room.clone());
+        let weak_room = Arc::downgrade(&room);
         let rtc_config_clone = RTCConfiguration {
             ice_servers: self.config.configuration.ice_servers.clone(),
             ..Default::default()
@@ -125,7 +123,7 @@ impl PubSubPeer {
             let closed_out_1 = self.closed.clone();
 
             let publisher =
-                Arc::new(Publisher::new(self.user_id.clone(), room.clone(), peer_config).await?);
+                Arc::new(Publisher::new(self.user_id.clone(), weak_room, peer_config).await?);
 
             publisher.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
                 let on_ice_candidate_in = on_ice_candidate_out.clone();
@@ -308,7 +306,6 @@ impl Debug for PubSubPeer {
         f.debug_struct("Peer")
             .field("config", &self.config.router)
             .field("id", &self.id)
-            .field("room", &self.room)
             .field("user_id", &self.user_id)
             .field("track_map", &self.track_map)
             .finish()

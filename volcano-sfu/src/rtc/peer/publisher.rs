@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use anyhow::Result;
 use tokio::sync::Mutex;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -24,7 +24,7 @@ pub struct Publisher {
     pc: Arc<RTCPeerConnection>,
 
     router: Arc<LocalRouter>,
-    room: Arc<Room>,
+    room: Weak<Room>,
     tracks: Arc<Mutex<Vec<PublisherTrack>>>,
     candidates: Arc<Mutex<Vec<RTCIceCandidateInit>>>,
     session_version: AtomicU64,
@@ -48,7 +48,7 @@ pub(super) struct PublisherTrack {
 impl Publisher {
     pub async fn new(
         id: String,
-        room: Arc<Room>,
+        room: Weak<Room>,
         cfg: WebRTCTransportConfig,
     ) -> Result<Self> {
         let router = cfg.router.clone();
@@ -163,8 +163,8 @@ impl Publisher {
     async fn on_track(&self) {
         let router_out = Arc::clone(&self.router);
         let router_out_2 = Arc::clone(&self.router);
-        let room_out = Arc::clone(&self.room);
-        let room_out_2 = Arc::clone(&self.room);
+        let room_out = self.room.clone();
+        let room_out_2 = self.room.clone();
         let tracks_out = Arc::clone(&self.tracks);
         let peer_id_out_2 = self.id.clone();
         let user_id_out = self.id.clone();
@@ -173,8 +173,7 @@ impl Publisher {
         self.pc.on_track(Box::new(
             move |track: Arc<TrackRemote>, receiver: Arc<RTCRtpReceiver>, _: Arc<RTCRtpTransceiver>| {
                 let router_in = Arc::clone(&router_out);
-                let router_in2 = Arc::clone(&router_out);
-                let room_in = Arc::clone(&room_out);
+                let room_in = room_out.clone();
                 let tracks_in = Arc::clone(&tracks_out);
                 let user_id_in = user_id_out.clone();
 
@@ -191,7 +190,11 @@ impl Publisher {
                     debug!("[Publisher {}] Add track receiver with track {} into router", user_id_in, r.track_id());
                     let receiver_clone = r.clone();
                     if publish {
-                        room_in.publish_track(router_in2, r.clone()).await;
+                        if let Some(room) = room_in.upgrade() {
+                            room.publish_track(&router_in, r).await;
+                        } else {
+                            warn!("Publish track failed.");
+                        }
                         tracks_in.lock().await.push(PublisherTrack {
                             track: track_clone.clone(),
                             receiver: receiver_clone,
@@ -206,17 +209,18 @@ impl Publisher {
                     }
                     let recv_tracks = receiver_2.tracks().await;
                     let tracks = recv_tracks.iter().map(|t| (t.id(), t.rid())).collect::<Vec<_>>();
-                    for (track_id, track_rid) in tracks {
-                        info!("[Publisher {}] Adding track {} [{}] to user", user_id_in, track_id, track_rid);
-                        room_in.add_user_track(user_id_in.clone(), track_stream_id.clone(), track_id, track_rid.len() > 0);
+                    if let Some(room) = room_in.upgrade() {
+                        for (track_id, track_rid) in tracks {
+                            info!("[Publisher {}] Adding track {} [{}] to user", user_id_in, track_id, track_rid);
+                            room.add_user_track(user_id_in.clone(), track_stream_id.clone(), track_id, track_rid.len() > 0);
+                        }
                     }
-                    
                 })
             })
         );
 
         self.pc.on_data_channel(Box::new(move |channel| {
-            let room_in = Arc::clone(&room_out_2);
+            let room_in = room_out_2.clone();
             let id_in = peer_id_out_2.clone();
             // Ignore our default channel, exists to force ICE candidates. See signalPair for more info
             if channel.label() == super::API_CHANNEL_LABEL {
@@ -226,7 +230,9 @@ impl Publisher {
                 });
             }
             Box::pin(async move {
-                room_in.add_data_channel(&id_in, channel).await;
+                if let Some(room) = room_in.upgrade() {
+                    room.add_data_channel(&id_in, channel).await;
+                }
             })
         }));
 
