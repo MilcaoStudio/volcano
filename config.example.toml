@@ -63,6 +63,10 @@ urls = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
 # external users.
 # nat1to1 = ["1.2.3.4"]
 # icelite = true
+# Disable connections to IPv4 (not recommended)
+# disableipv4 = true
+# Disable connections to IPv6
+# disableipv6 = true
 
 [webrtc.timeouts]
 # The duration in [sec] without network activity before a ICE Agent is considered disconnected

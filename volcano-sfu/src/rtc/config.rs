@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::{net::UdpSocket, sync::Mutex};
-use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}};
+use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, network_type::{supported_network_types, NetworkType}, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}};
 use anyhow::Result;
 
 use crate::{buffer::AtomicFactory};
@@ -29,6 +29,10 @@ struct Candidates {
     ice_lite: Option<bool>,
     #[serde(rename = "nat1to1ips")]
     nat1_to_1ips: Option<Vec<String>>,
+    #[serde(rename = "disableipv4", default)]
+    disable_ipv4: bool,
+    #[serde(rename = "disableipv6", default)]
+    disable_ipv6: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -208,6 +212,19 @@ impl WebRTCTransportConfig {
         if c.webrtc.mdns {
             se.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
         }
+
+        let candidates = &c.webrtc.candidates;
+        let network_types = if candidates.disable_ipv6 {
+            vec![NetworkType::Tcp4, NetworkType::Udp4]
+        } else if candidates.disable_ipv4 {
+            vec![NetworkType::Tcp6, NetworkType::Udp6]
+        } else {
+            // Same effect as returning an empty vector
+            supported_network_types()
+        };
+
+        se.set_network_types(network_types);
+
 
         WebRTCTransportConfig {
             configuration: RTCConfiguration {
