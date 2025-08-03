@@ -103,27 +103,31 @@ impl AudioObserver {
     /// # Returns
     /// Vector of stream ids from selected streams, or None if the vector could be empty.
     pub async fn calc(&mut self) -> Option<Vec<String>> {
-        let current_ids = Arc::new(self.streams.iter().map(|s| s.key().clone()).collect::<DashSet<_>>());
-
-        let mut stream_ids = Vec::new();
+        let current_ids = Arc::new(DashSet::new());
 
         for mut stream in self.streams.iter_mut() {
             if stream.total >= self.expected {
                 debug!("[stream {}] {}/{} (acceptable)", stream.id, stream.total, self.expected);
-                stream_ids.push(stream.id.clone());
+                current_ids.insert(stream.id.clone());
             }
 
             stream.total = 0;
             stream.sum = 0;
         }
-
+        
+        debug!("stream ids={:?}", current_ids);
         if current_ids.len() == self.previous.len() &&
             self.previous.iter().all(|k| current_ids.contains(k.key())) {
+            debug!("return None");
             return None;
         }
 
-        let _ = std::mem::replace(&mut self.previous, current_ids);
+        // Clone current
+        let stream_ids = current_ids.iter().map(|s| s.clone()).collect::<Vec<_>>();
 
+        // Move current
+        let _ = std::mem::replace(&mut self.previous, current_ids);
+        debug!("Send stream ids={:?}", stream_ids);
         Some(stream_ids)
     }
 
