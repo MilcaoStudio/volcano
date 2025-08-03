@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures::{TryStreamExt};
+use tokio::sync::{broadcast::error::RecvError, watch};
 use volcano_sfu::rtc::{
     config::WebRTCTransportConfig,
     peer::{PeerConfig, PubSubPeer},
@@ -24,6 +25,8 @@ use super::{
 
 /// Information about user, room and peer connection
 pub struct Client {
+    close_events_tx: watch::Sender<bool>,
+    close_events_rx: watch::Receiver<bool>,
     user: UserInformation,
     pub room: Option<Arc<Room>>,
     pub peer: Arc<PubSubPeer>,
@@ -33,7 +36,10 @@ pub struct Client {
 impl Client {
     /// Create a new Client for a user in a room
     pub async fn new(user: UserInformation, config: Arc<WebRTCTransportConfig>, db: Arc<ReferenceDb>) -> Result<Self> {
+        let (close_tx, close_rx) = watch::channel(false);
         Ok(Self {
+            close_events_tx: close_tx,
+            close_events_rx: close_rx,
             db,
             user: user.clone(),
             room: None,
@@ -114,6 +120,10 @@ impl Client {
                 debug!("Room {} is empty. Should clean up?", room.id);
             }
         }
+            if let Err(_) = self.close_events_tx.send(true) {
+                warn!("[Client {0}] Send close signal failed.", user_id);
+            };
+        
         Ok(())
     }
 
@@ -129,6 +139,8 @@ impl Client {
                 offer,
                 cfg,
             } => {
+                // Send "open" without receivers
+                self.close_events_tx.send_replace(false);
                 let room = self.db.fetch_or_create_room(&room_id).await;
                 self.room = Some(room.clone());
 
@@ -144,6 +156,7 @@ impl Client {
                         if room.is_empty() {
                             room.close().await;
                         }
+                        let _ = self.close_events_tx.send(true);
                         Ok(()) // Drop room
                     }
                     _ => Err(ServerError::RoomNotFound.into()),
@@ -265,14 +278,39 @@ impl Client {
             error!("send room info error: {}", err);
         };
 
-        // Listen to room events
-        let mut event_rx = room.subscribe_to_events();
+        let mut close_rx = self.close_events_rx.clone();
         tokio::spawn(async move {
-            // Moves room
-            while let Ok(event) = event_rx.recv().await {
-                room.send_to_subscribers(event).await;
+            let mut event_rx = room.subscribe_to_events();
+            loop {
+                // Listen to room events
+                tokio::select! {
+                    result = event_rx.recv() => {
+                        match result {
+                            Ok(event) => {
+                                room.send_to_subscribers(event).await;
+                            }
+                            Err(RecvError::Lagged(n)) => {
+                                warn!("Room event listener lagged. {n} events.");
+                            }
+                            Err(RecvError::Closed) => {
+                                break
+                            }
+                        }
+                    }
+
+                    msg = close_rx.changed() => {
+                        match msg {
+                            Ok(_) => {
+                                if *close_rx.borrow_and_update() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
             }
-            debug!("Room event sender closed");
+            debug!("End task: Listen to room events");
         });
 
         // End message handle
