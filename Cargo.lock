@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1653,7 +1653,6 @@ dependencies = [
  "fern",
  "futures",
  "log",
- "postage",
  "serde",
  "serde_json",
  "thiserror",

@@ -1,6 +1,6 @@
 [package]
 name = "server"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 publish = false
 
@@ -21,6 +21,7 @@ fern = { version = "0.7.1", features = ["colored", "date-based", "chrono"] }
 
 # Error
 thiserror = "1.0.58"
+anyhow = "1.0.82"
 
 # Serde
 serde = { version = "1.0.197", features = ["derive"] }
@@ -28,8 +29,7 @@ serde_json = "1.0.115"
 
 # WebRTC
 webrtc = "0.13.0"
-
-anyhow = "1.0.82"
-postage = "0.5.0"
 volcano-sfu = {path = "../volcano-sfu" }
+
+# CLI
 clap = { version = "4.5.40", features = ["derive"] }
