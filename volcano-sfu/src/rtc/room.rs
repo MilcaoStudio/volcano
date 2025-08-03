@@ -30,37 +30,45 @@ pub struct UserStream {
     pub simulcast: bool,
 }
 
-/// Room event which indicates something happened to a peer
+/// Room event which displays information happening in a WebRTC session.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
 #[non_exhaustive]
 pub enum RoomEvent {
-    RoomCreated(String),
+    /// This room is closed. *Not implemented*.
     RoomClosed(String),
+    /// A peer joined this room. [UserStream]s should be received by client before the local subscriber starts sending tasks.
     RoomInfo(RoomInfo),
+    /// Some [DownTrack]s were removed. The client must know about these tracks. 
     TracksRemoved {
         removed_tracks: Vec<String>,
         room_id: String,
     },
+    /// [LocalRouter] observes voice activity from published tracks
     VoiceActivity {
         room_id: String,
         stream_ids: Vec<String>,
     },
+    /// This room observes voice activity from published tracks.
+    /// *Not implemented*.
     UserSpeaking {
         room_id: String,
         uid: String,
         sids: Vec<String>,
     },
+    /// A new user joined this room. This event is triggered since a second peer joins.
     UserJoined {
         room_id: String,
         uid: String,
     },
+    /// Local [Publisher] receives a remote track from an user.
     TrackAdded {
         room_id: String,
         uid: String,
         track: String,
         stream: UserStream,
     },
+    /// User leaves this room. This event is not triggered when this room becomes empty.
     UserLeft {
         room_id: String,
         uid: String,

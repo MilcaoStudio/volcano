@@ -3,7 +3,7 @@ use byteorder::{BigEndian, ByteOrder};
 use super::error::{BufferError, Result};
 
 /// Maximum packet size in bytes. including the header and the packet size.
-const MAX_PACKET_SIZE: usize = 1500;
+pub const MAX_PACKET_SIZE: usize = 1500;
 
 /// Calculates the distance between two RTP sequence numbers (16-bit),
 /// taking into account their **circular** behavior from `0` to `65535`.

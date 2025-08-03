@@ -25,7 +25,7 @@ impl RTCPForwarder {
     }
 
     /// Sets `on_packet` callback.
-    /// This callback will be called from [Self::write].
+    /// This callback will be called from [Self::send_packets].
     pub async fn set_on_packets(&self, f: OnPacketBatchFn) {
         let mut on_packets = self.on_packets_handler.lock().await;
         *on_packets = Some(f);

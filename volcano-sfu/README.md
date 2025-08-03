@@ -5,6 +5,7 @@
 - Async-first architecture (`tokio`)
 - Callbacks for peer events
 - Two peer connections (subscriber and publisher) per room
+- Router forwards RTP packets to new local tracks with similar track IDs.
 - Simple integration for WebSockets or other protocols
 - API data channel for room events
 - Voice activity detection
@@ -18,7 +19,7 @@ This example is extracted from [volcano server](https://github.com/MilcaoStudio/
 ```rust
     pub async fn handle_join(
         &self,
-        write: &Sender,
+        write: Arc<Sender>,
         room: Arc<Room>,
         initial_offer: RTCSessionDescription,
         cfg: &JoinConfig,
@@ -57,10 +58,6 @@ This example is extracted from [volcano server](https://github.com/MilcaoStudio/
             let peer_id_in = peer_id.clone();
             let write_in = write_out_3.clone();
             Box::pin(async move {
-                debug!(
-                    "[Publisher {}] ICE connection state changed to: {}",
-                    peer_id_in, state
-                );
                 match state {
                     RTCIceConnectionState::Failed => {
                         if let Err(err) = write_in
@@ -79,7 +76,6 @@ This example is extracted from [volcano server](https://github.com/MilcaoStudio/
         .await;
 
         if let Err(err) = peer.join(room.clone(), cfg).await {
-            error!("join error: {}", err);
             return Err(err);
         }
 
@@ -100,7 +96,6 @@ This example is extracted from [volcano server](https://github.com/MilcaoStudio/
                         error: err.to_string(),
                     })
                     .await?;
-                error!("answer error: {}", err);
             }
         };
 
@@ -109,6 +104,41 @@ This example is extracted from [volcano server](https://github.com/MilcaoStudio/
         if let Err(err) = write.send(PacketS2C::RoomInfo { room: room_info }).await {
             error!("send room info error: {}", err);
         };
+
+        let mut close_rx = self.close_events_rx.clone();
+        tokio::spawn(async move {
+            let mut event_rx = room.subscribe_to_events();
+            loop {
+                // Listen to room events
+                tokio::select! {
+                    result = event_rx.recv() => {
+                        match result {
+                            Ok(event) => {
+                                // Send events to a data channel (if it is open)
+                                room.send_to_subscribers(event).await;
+                            }
+                            Err(RecvError::Lagged(n)) => {
+                                warn!("Room event listener lagged. {n} events.");
+                            }
+                            Err(RecvError::Closed) => {
+                                break
+                            }
+                        }
+                    }
+
+                    msg = close_rx.changed() => {
+                        match msg {
+                            Ok(_) => {
+                                if *close_rx.borrow_and_update() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
         Ok(())
     }
 ```

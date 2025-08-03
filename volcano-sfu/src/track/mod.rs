@@ -20,7 +20,7 @@ pub mod router;
 
 /// Helper to detect and modify accordingly the vp8 payload to reflect
 /// temporal changes in the SFU.
-/// VP8 temporal layers implemented according https://tools.ietf.org/html/rfc7741
+/// VP8 temporal layers implemented according <https://tools.ietf.org/html/rfc7741>
 pub async fn set_vp8_temporal_layer(
     ext_packet: &ExtPacket,
     d: &DownTrack,
