@@ -464,12 +464,7 @@ impl LocalRouter {
                 self.receivers.insert(track_id, arc_receiver.clone());
                 published = true;
                 info!("Track {} published", track.id());
-
-                info!(
-                    "[Publisher {}] Reading RTCP packets from {}",
-                    self.id,
-                    track.id()
-                );
+                
                 let rtp_rv1 = rtp_receiver.clone();
                 tokio::spawn(async move {
                     // Use mtu size (1460)
@@ -514,7 +509,7 @@ impl LocalRouter {
         tokio::spawn(async move {
             // Use mtu size (1460)
             while let Ok((pkt, _)) = track.read_rtp().await {
-                trace!("Write RTP packet");
+                //trace!("Write RTP packet");
                 buffer_clone.write(pkt).await;
             }
         });

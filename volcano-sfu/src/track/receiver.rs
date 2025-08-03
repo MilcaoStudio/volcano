@@ -684,9 +684,9 @@ impl Receiver for WebRTCReceiver {
                     read = packet_read.recv() => {
                         match read {
                             Some(pkt) => {
-                                trace!("RTP packet received (arrival {})", pkt.arrival.as_secs_f64());
+                                //trace!("RTP packet received (arrival {})", pkt.arrival.as_secs_f64());
                                 if self.is_simulcast && self.pending[layer].load(Ordering::Relaxed) {
-                                    debug!("Reading packet on layer {layer} in simulcast receiver");
+                                    //trace!("Reading packet on layer {layer} in simulcast receiver");
                                     if pkt.key_frame {
                                         //use tmp_val here just to skip the build error
                                         let mut pending_tracks = Vec::new();

@@ -615,7 +615,7 @@ impl DownTrack {
                     .packet_sent_count
                     .swap(0, Ordering::SeqCst) / seconds_per_stat;
                 trace!(
-                    "[Track {}] Sending {count} simple RTP packets per second",
+                    "[Track {}] Sending {count} RTP packets per second",
                     self.id()
                 );
                 *instant = Instant::now();
