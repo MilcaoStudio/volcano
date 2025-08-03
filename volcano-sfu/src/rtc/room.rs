@@ -85,7 +85,7 @@ pub struct Room {
     event_sender: Sender<RoomEvent>,
     //participants: DashSet<String>,
     //audio_observer: Arc<Mutex<AudioObserver>>,
-    user_tracks: DashMap<String, Vec<String>>,
+    //user_tracks: DashMap<String, Vec<String>>,
     user_streams: DashMap<String, Vec<UserStream>>,
     peers: DashMap<String, Arc<PubSubPeer>>,
     tracks: DashMap<String, Arc<TrackLocalStaticRTP>>,
@@ -104,7 +104,7 @@ impl Room {
             labels: Default::default(),
             peers: Default::default(),
             //audio_observer: Arc::new(Mutex::new(audio_observer)),
-            user_tracks: Default::default(),
+            //user_tracks: Default::default(),
             user_streams: Default::default(),
             tracks: Default::default(),
         })
@@ -250,7 +250,7 @@ impl Room {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.user_tracks.len() == 0
+        self.user_streams.len() == 0
     }
 
     /// Fanouts raw message received from any data channel to subscribed data channels
@@ -282,6 +282,7 @@ impl Room {
 
     /// Listen for events from the room
     pub fn subscribe_to_events(&self) -> Receiver<RoomEvent> {
+        debug!("[Room {}] Added subscription to events", self.id);
         self.event_sender.subscribe()
     }
 
@@ -296,7 +297,7 @@ impl Room {
 
     /// Get all user IDs currently in the room
     pub fn get_user_ids(&self) -> Vec<String> {
-        self.user_tracks
+        self.user_streams
             .iter()
             .map(|item| item.key().to_owned())
             .collect()
@@ -304,7 +305,7 @@ impl Room {
 
     /// Check if a user is in a room
     pub fn in_room(&self, id: &str) -> bool {
-        self.user_tracks.contains_key(id)
+        self.user_streams.contains_key(id)
     }
 
     /// Adds an user into this room and triggers [RoomEvent::UserJoined]
@@ -318,6 +319,8 @@ impl Room {
         if self.user_streams.len() > 0 {
             self.trigger_event(ev);
         }
+        
+        self.user_streams.insert(user_id, Vec::default());
     }
 
 
