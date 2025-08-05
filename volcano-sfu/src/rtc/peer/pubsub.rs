@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::{
     fmt::Debug,
     sync::{
@@ -19,13 +18,9 @@ use webrtc::{
 
 use super::{
     OnICEConnectionStateChangeFn, OnOfferFn, OnPubSubICECandidateFn, PeerConfig, Publisher,
-    Subscriber,
+    Subscriber, Result, Error
 };
-use crate::rtc::{config::WebRTCTransportConfig, room::Room};
-use crate::track::error::Error;
-
-const PUBLISHER: u8 = 0;
-const SUBSCRIBER: u8 = 1;
+use crate::rtc::{config::WebRTCTransportConfig, peer::PeerRole, room::Room};
 
 /// Two peer connections are used by this peer. Ideal for handling multiple requests.
 ///
@@ -65,13 +60,13 @@ impl PubSubPeer {
             Some(publisher) => {
                 info!("[Peer {}] Get offer", self.id());
                 if publisher.signaling_state() != RTCSignalingState::Stable {
-                    return Err(Error::ErrOfferIgnored.into());
+                    return Err(Error::ErrOfferIgnored);
                 }
 
                 info!("[Publisher {}] Send answer", self.id());
-                publisher.answer(sdp).await
+                publisher.answer(sdp).await.map_err(Into::into)
             }
-            _ => Err(Error::ErrNoTransportEstablished.into()),
+            _ => Err(Error::ErrNoTransportEstablished),
         }
     }
     /// Clean up any open connections
@@ -136,7 +131,7 @@ impl PubSubPeer {
                     if let Some(on_ice_candidate) = &mut *on_ice_candidate_in.lock().await {
                         if !closed_in.load(Ordering::Relaxed) {
                             if let Ok(val) = candidate.unwrap().to_json() {
-                                on_ice_candidate(val, PUBLISHER).await;
+                                on_ice_candidate(val, PeerRole::Publisher).await;
                             }
                         }
                     }
@@ -233,7 +228,7 @@ impl PubSubPeer {
                 if let Some(on_ice_candidate) = &mut *on_ice_candidate_in.lock().await {
                     if !closed_in.load(Ordering::Relaxed) {
                         if let Ok(val) = candidate.unwrap().to_json() {
-                            on_ice_candidate(val, SUBSCRIBER).await;
+                            on_ice_candidate(val, PeerRole::Subscriber).await;
                         }
                     }
                 }
@@ -268,7 +263,7 @@ impl PubSubPeer {
 
                 subscriber.on_answer().map_err(Into::into)
             }
-            _ => Err(Error::ErrNoTransportEstablished.into()),
+            _ => Err(Error::ErrNoTransportEstablished),
         }
     }
 
@@ -276,28 +271,22 @@ impl PubSubPeer {
         self.subscriber.lock().await.clone()
     }
 
-    pub async fn trickle(&self, candidate: RTCIceCandidateInit, target: u8) -> Result<()> {
-        let subscriber = self.subscriber.lock().await;
-        let publisher = self.publisher.lock().await;
-        if subscriber.is_none() || publisher.is_none() {
-            return Err(Error::ErrNoTransportEstablished.into());
-        }
-
+    pub async fn trickle(&self, candidate: RTCIceCandidateInit, target: PeerRole) -> Result<()> {
         info!("PeerLocal {} adds ICE candidate", self.id);
         match target {
-            PUBLISHER => {
-                if let Some(publisher) = &*publisher {
-                    publisher.add_ice_candidate(candidate).await?;
+            PeerRole::Publisher => {
+                match self.publisher.lock().await.as_ref() {
+                    Some(publisher) => publisher.add_ice_candidate(candidate).await.map_err(Into::into),
+                    _ => Err(Error::ErrNoPublisher)
                 }
             }
-            SUBSCRIBER => {
-                if let Some(subscriber) = &*subscriber {
-                    subscriber.add_ice_candidate(candidate).await?;
+            PeerRole::Subscriber => {
+                match self.subscriber.lock().await.as_ref() {
+                    Some(subscriber) => subscriber.add_ice_candidate(candidate).await.map_err(Into::into),
+                    _ => Err(Error::ErrNoSubscriber)
                 }
             }
-            _ => {}
         }
-        Ok(())
     }
 }
 

@@ -274,7 +274,7 @@ impl LocalRouter {
         &self,
         subscriber: Arc<Subscriber>,
         receiver: Option<Arc<WebRTCReceiver>>,
-    ) -> peer::error::Result<bool> {
+    ) -> peer::Result<bool> {
         let mut should_negotiate = false;
         if subscriber.no_auto_subscribe {
             info!(

@@ -50,23 +50,8 @@ impl Publisher {
         id: String,
         room: Weak<Room>,
         cfg: WebRTCTransportConfig,
-    ) -> Result<Self> {
+    ) -> Result<Self, webrtc::Error> {
         let router = cfg.router.clone();
-        /*
-        let rtc_config = RTCConfiguration {
-            ice_servers: cfg.configuration.ice_servers.clone(),
-            ..Default::default()
-        };
-
-        
-        let config_clone = WebRTCTransportConfig {
-            configuration: rtc_config,
-            setting: cfg.setting.clone(),
-            router: cfg.router.clone(),
-            factory: Arc::new(Mutex::new(AtomicFactory::new(1000, 1000))),
-        };rtc_confrtc_configig
-        */
-
         let pc = api::create_publisher_connection(cfg).await?;
         let publisher = Publisher {
             id: id.clone(),
@@ -84,7 +69,7 @@ impl Publisher {
         Ok(publisher)
     }
 
-    pub async fn add_ice_candidate(&self, candidate: RTCIceCandidateInit) -> Result<()> {
+    pub async fn add_ice_candidate(&self, candidate: RTCIceCandidateInit) -> Result<(), webrtc::Error> {
         if self.pc.remote_description().await.is_some() {
             self.pc.add_ice_candidate(candidate.clone()).await?;
             info!("publisher::add_ice_candidate add candidate into peer connection");
@@ -97,7 +82,7 @@ impl Publisher {
         Ok(())
     }
 
-    pub async fn answer(&self, offer: RTCSessionDescription) -> Result<RTCSessionDescription> {
+    pub async fn answer(&self, offer: RTCSessionDescription) -> Result<RTCSessionDescription, webrtc::Error> {
         let mut candidates = self.candidates.lock().await;
 
         if let Some(current_session) = self.pc.current_remote_description().await

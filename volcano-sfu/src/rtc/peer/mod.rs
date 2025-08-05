@@ -1,19 +1,27 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use webrtc::{ice_transport::{ice_candidate::RTCIceCandidateInit}, peer_connection::{offer_answer_options::RTCOfferOptions, sdp::session_description::RTCSessionDescription, OnICEConnectionStateChangeHdlrFn}};
+use webrtc::{
+    ice_transport::ice_candidate::RTCIceCandidateInit,
+    peer_connection::{
+        OnICEConnectionStateChangeHdlrFn, offer_answer_options::RTCOfferOptions,
+        sdp::session_description::RTCSessionDescription,
+    },
+};
 
 pub mod api;
-pub mod error;
+mod central;
+mod error;
 mod publisher;
 mod pubsub;
 mod subscriber;
-mod central;
 
-pub use publisher::Publisher;
-pub use subscriber::Subscriber;
-pub use pubsub::PubSubPeer;
 pub use central::CentralPeer;
+pub use error::Error;
+pub use error::Result;
+pub use publisher::Publisher;
+pub use pubsub::PubSubPeer;
+pub use subscriber::Subscriber;
 
 pub const API_CHANNEL_LABEL: &str = "System";
 
@@ -26,20 +34,30 @@ pub type OnOfferFn = Box<
 >;
 
 pub type OnPubSubICECandidateFn = Box<
-    dyn (FnMut(RTCIceCandidateInit, u8) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
+    dyn (FnMut(RTCIceCandidateInit, PeerRole) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
         + Send
         + Sync,
 >;
 
 pub type OnICECandidateFn = Box<
-dyn (FnMut(RTCIceCandidateInit) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
-    + Send
-    + Sync,
+    dyn (FnMut(RTCIceCandidateInit) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
+        + Send
+        + Sync,
 >;
 
-pub type OnNegotiateFn =
-    Box<dyn (FnMut(Option<RTCOfferOptions>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>)
-     + Send + Sync>;
+pub type OnNegotiateFn = Box<
+    dyn (FnMut(Option<RTCOfferOptions>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>)
+        + Send
+        + Sync,
+>;
+use serde_repr::{Deserialize_repr, Serialize_repr};
+
+#[derive(Clone, Copy, Debug, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum PeerRole {
+    Publisher,
+    Subscriber,
+}
 
 /// Peer configuration for enabling/disabling the publisher and/or the subscriber
 #[derive(Debug, Default, Deserialize)]
@@ -49,13 +67,13 @@ pub struct PeerConfig {
     pub no_auto_subscribe: bool,
 }
 
-use error::Result;
 use std::sync::Arc;
+
 use super::room::Room;
 #[async_trait]
 pub trait Peer: Send + Sync {
     /// Sets remote and local descriptions for this peer. If this fails, a new offer should be created from client side.
-    /// 
+    ///
     /// If there are candidates awaiting to be added, they should be added to the peer connection and cleaned up.
     async fn answer(&self, sdp: RTCSessionDescription) -> Result<RTCSessionDescription>;
 
@@ -63,13 +81,13 @@ pub trait Peer: Send + Sync {
     async fn clean_up(&self);
 
     /// Joins a room.
-    /// 
+    ///
     /// A new peer connection should be created and this peer should be added to the room.
     async fn join(self: &Arc<Self>, room: Arc<Room>) -> Result<()>;
 
     /// Starts negotiation process.
-    /// 
-    /// This peer must create an offer, and send it to the client. 
+    ///
+    /// This peer must create an offer, and send it to the client.
     async fn negotiate(&self, offer_options: Option<RTCOfferOptions>) -> Result<()>;
 
     /// Sets a function to be called when current peer connection receives an ICE candidate.
