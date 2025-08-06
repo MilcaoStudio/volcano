@@ -402,18 +402,15 @@ impl Peer for CentralPeer {
         info!("[{id}] Join to {} requested", room.id);
         *self.room.lock().await = Some(room.clone());
 
-        let rtc_config_clone = RTCConfiguration {
-            ice_servers: self.config.configuration.ice_servers.clone(),
-            ..Default::default()
-        };
-        let peer_config = WebRTCTransportConfig {
-            configuration: rtc_config_clone,
-            setting: self.config.setting.clone(),
-            router: self.config.router.clone(),
-            factory: Arc::default(),
-            version: self.config.version.clone(),
-            port_map: self.config.port_map,
-        };
+        let mut peer_config = (*self.config).clone();
+        {
+            peer_config.configuration = RTCConfiguration {
+                ice_servers: self.config.configuration.ice_servers.clone(),
+                ..Default::default()
+            };
+            peer_config.factory = Arc::default();
+        }
+        
         let router = Arc::new(LocalRouter::new(
             self.id.clone(),
             Arc::downgrade(&room),

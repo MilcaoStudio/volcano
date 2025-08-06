@@ -100,19 +100,15 @@ impl PubSubPeer {
         info!("[{id}] Join to {} requested", room.id);
 
         let weak_room = Arc::downgrade(&room);
-        let rtc_config_clone = RTCConfiguration {
-            ice_servers: self.config.configuration.ice_servers.clone(),
-            ..Default::default()
-        };
-        let peer_config = WebRTCTransportConfig {
-            configuration: rtc_config_clone,
-            setting: self.config.setting.clone(),
-            router: self.config.router.clone(),
-            factory: Arc::default(),
-            version: self.config.version.clone(),
-            port_map: self.config.port_map,
-        };
-
+        let mut peer_config = (*self.config).clone();
+        {
+            peer_config.configuration = RTCConfiguration {
+                ice_servers: peer_config.ice_servers.clone(),
+                ..Default::default()
+            };
+            peer_config.factory = Arc::default();
+        }
+        
         if !cfg.no_publish {
             let on_ice_candidate_out = self.on_ice_candidate_fn.clone();
             let closed_out_1 = self.closed.clone();

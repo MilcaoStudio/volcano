@@ -62,7 +62,7 @@ impl Default for PortMap {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct WebRTCTransportConfig {
     pub version: String,
     pub configuration: RTCConfiguration,
