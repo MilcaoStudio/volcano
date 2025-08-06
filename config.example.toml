@@ -62,7 +62,7 @@ urls = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
 # if the sfu is deployed in a DMZ between two 1-1 NAT for internal and
 # external users.
 # nat1to1 = ["1.2.3.4"]
-# icelite = true
+icelite = true
 # Disable connections to IPv4 (not recommended)
 # disableipv4 = true
 # Disable connections to IPv6
@@ -78,7 +78,7 @@ keepalive = 2
 
 [turn]
 # Enables embeded turn server
-enabled = true
+enabled = false
 # Sets the realm for turn server
 realm = "uprising"
 # The address the TURN server will listen on.

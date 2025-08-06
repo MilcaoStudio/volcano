@@ -1,10 +1,23 @@
 use std::{sync::Arc, time::Duration};
 
-use tokio::{net::UdpSocket, sync::Mutex};
-use webrtc::{api::setting_engine::SettingEngine, ice::{mdns::MulticastDnsMode, network_type::{supported_network_types, NetworkType}, udp_mux::{UDPMuxDefault, UDPMuxParams}, udp_network::{EphemeralUDP, UDPNetwork}}, ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, policy::sdp_semantics::RTCSdpSemantics}};
 use anyhow::Result;
+use tokio::{net::UdpSocket, sync::Mutex};
+use webrtc::{
+    api::setting_engine::SettingEngine,
+    ice::{
+        mdns::MulticastDnsMode,
+        network_type::{NetworkType, supported_network_types},
+        udp_mux::{UDPMuxDefault, UDPMuxParams},
+        udp_network::{EphemeralUDP, UDPNetwork},
+    },
+    ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer},
+    peer_connection::{
+        configuration::RTCConfiguration,
+        policy::sdp_semantics::RTCSdpSemantics,
+    },
+};
 
-use crate::{buffer::AtomicFactory};
+use crate::buffer::AtomicFactory;
 
 #[cfg(feature = "turn")]
 use crate::turn::TurnConfig;
@@ -40,7 +53,7 @@ pub enum PortMap {
     /// Single port used for UDP Mux network
     Single(u16),
     // Port range used for UDP Ephemeral network
-    Range(u16, u16)
+    Range(u16, u16),
 }
 
 impl Default for PortMap {
@@ -53,6 +66,7 @@ impl Default for PortMap {
 pub struct WebRTCTransportConfig {
     pub version: String,
     pub configuration: RTCConfiguration,
+    pub ice_servers: Vec<RTCIceServer>,
     pub setting: SettingEngine,
     pub router: RouterConfig,
     pub factory: Arc<Mutex<AtomicFactory>>,
@@ -124,20 +138,18 @@ pub struct Config {
 }
 
 impl Config {
-
     /// Parses provided file content as TOML.
-    #[cfg(feature="toml")]
+    #[cfg(feature = "toml")]
     pub fn from_toml(content: &str) -> Result<Config, toml::de::Error> {
         toml::from_str(content)
     }
 }
 
 impl WebRTCTransportConfig {
-
     /// Creates the initial configuration for running RTC peer connections
     /// # Recommendations
     /// - Use `webrtc.ice_single_port` for internal RTCP packets handling. `webrtc.ice_port_range` is harder to handle.
-    /// - Use [Self::bind] to start the UDP socket. 
+    /// - Use [Self::bind] to start the UDP socket.
     pub fn new(c: &Config) -> Self {
         let mut se = SettingEngine::default();
         se.disable_media_engine_copy(true);
@@ -145,32 +157,33 @@ impl WebRTCTransportConfig {
         let port_map = if let Some(single_port) = c.webrtc.single_port {
             PortMap::Single(single_port)
         } else if let Some(ports) = &c.webrtc.ice_port_range {
-            assert!(ports.len() > 1, "Expected at least 2 elements in webrtc.ice_port_range");
+            assert!(
+                ports.len() > 1,
+                "Expected at least 2 elements in webrtc.ice_port_range"
+            );
             PortMap::Range(ports[0], ports[1])
         } else {
             panic!("Expected either webrtc.ice_single_port or webrtc.ice_port_range");
         };
 
         if c.turn.enabled {
-            error!("`turn` feature is not enabled for this crate. Turn server will not be started.");
+            error!(
+                "`turn` feature is not enabled for this crate. Turn server will not be started."
+            );
         }
-        
-        let mut ice_servers: Vec<RTCIceServer> = Vec::default();
+
         let ice_lite = c.webrtc.candidates.ice_lite.unwrap_or_default();
         se.set_lite(ice_lite);
-
-        if !ice_lite {
-            if let Some(ice_servers_cfg) = &c.webrtc.ice_servers {
-                    for ice_server in ice_servers_cfg {
-                        let s = RTCIceServer {
-                            urls: ice_server.urls.clone(),
-                            username: ice_server.username.clone(),
-                            credential: ice_server.credential.clone(),
-                        };
-    
-                        ice_servers.push(s);
-                    }
-            }
+        
+        let mut ice_servers: Vec<RTCIceServer> = Vec::default();
+        // Clone and move
+        if let Some(ice_servers_cfg) = c.webrtc.ice_servers.clone() {
+            ice_servers = ice_servers_cfg.into_iter()
+                .map(|s| RTCIceServer {
+                    urls: s.urls,
+                    username: s.username,
+                    credential: s.credential,
+                }).collect();
         }
 
         let mut _sdp_semantics = RTCSdpSemantics::UnifiedPlan;
@@ -203,21 +216,27 @@ impl WebRTCTransportConfig {
             );
         }
 
-        if let Some(nat1toiips) = &c.webrtc.candidates.nat1_to_1ips {
+        if let Some(nat1toiips) = c.webrtc.candidates.nat1_to_1ips.clone() {
             if !nat1toiips.is_empty() {
-                se.set_nat_1to1_ips(nat1toiips.clone(), RTCIceCandidateType::Host);
+                se.set_nat_1to1_ips(nat1toiips, RTCIceCandidateType::Host);
             }
         }
+
+        let mdns = if c.webrtc.mdns {
+            MulticastDnsMode::QueryAndGather
+        } else {
+            MulticastDnsMode::Disabled
+        };
         
-        if c.webrtc.mdns {
-            se.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
-        }
+        se.set_ice_multicast_dns_mode(mdns);
 
         let candidates = &c.webrtc.candidates;
         let network_types = if candidates.disable_ipv6 {
-            vec![NetworkType::Tcp4, NetworkType::Udp4]
+            debug!("SFU config: IPv6 disabled");
+            vec![NetworkType::Udp4]
         } else if candidates.disable_ipv4 {
-            vec![NetworkType::Tcp6, NetworkType::Udp6]
+            debug!("SFU config: IPv4 disabled");
+            vec![NetworkType::Udp6]
         } else {
             // Same effect as returning an empty vector
             supported_network_types()
@@ -225,12 +244,9 @@ impl WebRTCTransportConfig {
 
         se.set_network_types(network_types);
 
-
         WebRTCTransportConfig {
-            configuration: RTCConfiguration {
-                ice_servers,
-                ..Default::default()
-            },
+            configuration: RTCConfiguration::default(),
+            ice_servers,
             setting: se,
             router: c.router.clone(),
             factory: Arc::default(),
@@ -241,19 +257,25 @@ impl WebRTCTransportConfig {
 
     /// Binds the UDP network to receive data.
     pub async fn bind(&mut self) -> Result<()> {
-
         let se = &mut self.setting;
 
         let network = match self.port_map {
             PortMap::Single(port) => {
                 let udp_socket = UdpSocket::bind(("0.0.0.0", port)).await?;
+                // If port 0, set bound port
+                if let Ok((address, bind_port)) =
+                    udp_socket.local_addr().map(|ip| (ip.ip(), ip.port()))
+                {
+                    debug!("UDP socket (mux) bound to {address}:{bind_port}");
+                    self.port_map = PortMap::Single(bind_port);
+                };
                 let udp_mux = UDPMuxDefault::new(UDPMuxParams::new(udp_socket));
                 UDPNetwork::Muxed(udp_mux)
-            },
+            }
             PortMap::Range(min, max) => {
                 let ephemeral = EphemeralUDP::new(min, max)?;
                 UDPNetwork::Ephemeral(ephemeral)
-            },
+            }
         };
         se.set_udp_network(network);
 
