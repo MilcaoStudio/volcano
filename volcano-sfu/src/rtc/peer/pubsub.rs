@@ -272,7 +272,7 @@ impl PubSubPeer {
     }
 
     pub async fn trickle(&self, candidate: RTCIceCandidateInit, target: PeerRole) -> Result<()> {
-        info!("PeerLocal {} adds ICE candidate", self.id);
+        info!("PubSub {} adds ICE candidate to {target:?}", self.id);
         match target {
             PeerRole::Publisher => {
                 match self.publisher.lock().await.as_ref() {

@@ -3,7 +3,6 @@ use std::sync::{Arc, Weak};
 use anyhow::Result;
 use tokio::sync::Mutex;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
 use webrtc::peer_connection::{RTCPeerConnection, sdp::session_description::RTCSessionDescription};
 use webrtc::rtcp::packet::Packet as RtcpPacket;
@@ -124,13 +123,6 @@ impl Publisher {
         }
     }
 
-    async fn close_publisher(router: Arc<LocalRouter>, pc: Arc<RTCPeerConnection>) {
-        router.stop().await;
-        if let Err(err) = pc.close().await {
-            error!("close err: {}", err);
-        }
-    }
-
     pub async fn get_tracks(&self) -> Vec<Arc<TrackRemote>> {
         let tracks = &*self.tracks.lock().await;
         tracks.iter().map(|t| t.track.clone()).collect()
@@ -147,13 +139,13 @@ impl Publisher {
 
     async fn on_track(&self) {
         let router_out = Arc::clone(&self.router);
-        let router_out_2 = Arc::clone(&self.router);
+        //let router_out_2 = Arc::clone(&self.router);
         let room_out = self.room.clone();
         let room_out_2 = self.room.clone();
         let tracks_out = Arc::clone(&self.tracks);
         let peer_id_out_2 = self.id.clone();
         let user_id_out = self.id.clone();
-        let pc_out = self.pc.clone();
+        //let pc_out = self.pc.clone();
 
         self.pc.on_track(Box::new(
             move |track: Arc<TrackRemote>, receiver: Arc<RTCRtpReceiver>, _: Arc<RTCRtpTransceiver>| {
@@ -223,19 +215,12 @@ impl Publisher {
 
         let on_ice_connection_state_change_clone = self.ice_connection_state_change_handler.clone();
         self.pc.on_ice_connection_state_change(Box::new(move |s| {
-            let router_in = Arc::clone(&router_out_2);
-            let pc_in = pc_out.clone();
             let handler_in = Arc::clone(&on_ice_connection_state_change_clone);
             Box::pin(async move {
                 if let Some(h) = &mut *handler_in.lock().await {
                     h(s).await;
                 }
-                match s {
-                    RTCIceConnectionState::Failed | RTCIceConnectionState::Closed => {
-                        Publisher::close_publisher(router_in, pc_in).await;
-                    }
-                    _ => {}
-                }
+                // Do not close anything
             })
         }));
 
