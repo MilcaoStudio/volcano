@@ -1,6 +1,6 @@
 [package]
 name = "volcano-sfu"
-version = "0.4.0"
+version = "0.4.2"
 edition = "2024"
 authors = ["Ian Parra <ianparra200@gmail.com>"]
 description = "Selective Forwarding Unit (SFU) for WebRTC signaling apps"
@@ -37,6 +37,7 @@ webrtc = "0.13.0"
 
 # Configuration parsers
 toml = { version = "0.9.2", optional = true }
+serde_repr = "0.1.20"
 
 [features]
 default = ["toml"]

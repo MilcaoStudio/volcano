@@ -6,9 +6,9 @@ use webrtc::{
     api::setting_engine::SettingEngine,
     ice::{
         mdns::MulticastDnsMode,
-        network_type::{NetworkType, supported_network_types},
+        network_type::{supported_network_types, NetworkType},
         udp_mux::{UDPMuxDefault, UDPMuxParams},
-        udp_network::{EphemeralUDP, UDPNetwork},
+        udp_network::{EphemeralUDP, UDPNetwork}
     },
     ice_transport::{ice_candidate_type::RTCIceCandidateType, ice_server::RTCIceServer},
     peer_connection::{
@@ -40,7 +40,7 @@ struct ICEServerConfig {
 struct Candidates {
     #[serde(rename = "icelite")]
     ice_lite: Option<bool>,
-    #[serde(rename = "nat1to1ips")]
+    #[serde(rename = "nat1to1")]
     nat1_to_1ips: Option<Vec<String>>,
     #[serde(rename = "disableipv4", default)]
     disable_ipv4: bool,
@@ -76,11 +76,11 @@ pub struct WebRTCTransportConfig {
 #[derive(Clone, Default, Deserialize)]
 struct WebRTCTimeoutsConfig {
     #[serde(rename = "disconnected")]
-    ice_disconnected_timeout: i32,
+    ice_disconnected_timeout: u64,
     #[serde(rename = "failed")]
-    ice_failed_timeout: i32,
+    ice_failed_timeout: u64,
     #[serde(rename = "keepalive")]
-    ice_keepalive_interval: i32,
+    ice_keepalive_interval: u64,
 }
 #[derive(Clone, Default, Deserialize)]
 pub struct WebRTCConfig {
@@ -151,6 +151,7 @@ impl WebRTCTransportConfig {
     /// - Use `webrtc.ice_single_port` for internal RTCP packets handling. `webrtc.ice_port_range` is harder to handle.
     /// - Use [Self::bind] to start the UDP socket.
     pub fn new(c: &Config) -> Self {
+
         let mut se = SettingEngine::default();
         se.disable_media_engine_copy(true);
 
@@ -173,6 +174,7 @@ impl WebRTCTransportConfig {
         }
 
         let ice_lite = c.webrtc.candidates.ice_lite.unwrap_or_default();
+        debug!("SFU config: ICE lite {ice_lite}");
         se.set_lite(ice_lite);
         
         let mut ice_servers: Vec<RTCIceServer> = Vec::default();
@@ -198,26 +200,29 @@ impl WebRTCTransportConfig {
             _ => {}
         }
 
-        if c.webrtc.timeouts.ice_disconnected_timeout == 0
-            && c.webrtc.timeouts.ice_failed_timeout == 0
-            && c.webrtc.timeouts.ice_keepalive_interval == 0
-        {
+        let disconnected_timeout = if c.webrtc.timeouts.ice_disconnected_timeout > 0 {
+            Some(Duration::from_secs(c.webrtc.timeouts.ice_disconnected_timeout))
         } else {
-            se.set_ice_timeouts(
-                Some(Duration::from_secs(
-                    c.webrtc.timeouts.ice_disconnected_timeout as u64,
-                )),
-                Some(Duration::from_secs(
-                    c.webrtc.timeouts.ice_failed_timeout as u64,
-                )),
-                Some(Duration::from_secs(
-                    c.webrtc.timeouts.ice_keepalive_interval as u64,
-                )),
-            );
-        }
+            None
+        };
+        
+        let failed_timeout = if c.webrtc.timeouts.ice_failed_timeout > 0 {
+            Some(Duration::from_secs(c.webrtc.timeouts.ice_failed_timeout))
+        } else {
+            None
+        };
+        
+        let keep_alive_interval = if c.webrtc.timeouts.ice_keepalive_interval > 0 {
+            Some(Duration::from_secs(c.webrtc.timeouts.ice_keepalive_interval))
+        } else {
+            None
+        };
+        
+        se.set_ice_timeouts(disconnected_timeout, failed_timeout, keep_alive_interval);
 
         if let Some(nat1toiips) = c.webrtc.candidates.nat1_to_1ips.clone() {
             if !nat1toiips.is_empty() {
+                debug!("SFU config: Set {:?} for NAT 1-to-1 [Host]", nat1toiips);
                 se.set_nat_1to1_ips(nat1toiips, RTCIceCandidateType::Host);
             }
         }
@@ -256,7 +261,7 @@ impl WebRTCTransportConfig {
     }
 
     /// Binds the UDP network to receive data.
-    pub async fn bind(&mut self) -> Result<()> {
+    pub async fn bind_udp(&mut self) -> Result<()> {
         let se = &mut self.setting;
 
         let network = match self.port_map {
@@ -279,6 +284,33 @@ impl WebRTCTransportConfig {
         };
         se.set_udp_network(network);
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::{Ipv4Addr, SocketAddrV4}};
+
+    use tokio::net::UdpSocket;
+
+
+    #[tokio::test]
+    async fn test_udp_loopback() -> Result<(), Box<dyn std::error::Error>> {
+        let ip: Ipv4Addr = "127.0.0.1".parse()?;
+        let listen_addr = SocketAddrV4::new(ip, 60000);
+        let send_addr = SocketAddrV4::new(ip, 60001);
+        let listener = UdpSocket::bind(listen_addr).await?;
+    
+        let sender = UdpSocket::bind(send_addr).await?;
+        sender.send_to(b"STUN-TEST", &listen_addr).await?;
+    
+        let mut buf = [0; 100];
+        let (size, _) = listener.recv_from(&mut buf).await?;
+        let msg = String::from_utf8_lossy(&buf[..size]);
+    
+        assert_eq!(msg, "STUN-TEST", "Loopback should work");
+    
         Ok(())
     }
 }
