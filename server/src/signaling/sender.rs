@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
+use std::fmt::Debug;
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt,
 };
+use serde::Serialize;
 use tokio::{net::TcpStream, sync::Mutex};
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
-
-use super::packets::PacketS2C;
 
 type Sink = SplitSink<WebSocketStream<TcpStream>, Message>;
 
@@ -26,13 +26,19 @@ impl Sender {
     }
 
     /// Send a packet through the WebSocket
-    pub async fn send(&self, packet: PacketS2C) -> anyhow::Result<()> {
+    pub async fn send<Packet>(&self, packet: Packet) -> anyhow::Result<()>
+    where Packet: Debug + Serialize {
         debug!("S->C: {:?}", packet);
         self.writer
             .lock()
             .await
             .send(Message::Text(serde_json::to_string(&packet)?))
             .await.map_err(Into::into)
+    }
+
+    /// Closes socket stream with code 1005
+    pub async fn close(&self) -> anyhow::Result<()> {
+        self.writer.lock().await.close().await.map_err(Into::into)
     }
 }
 

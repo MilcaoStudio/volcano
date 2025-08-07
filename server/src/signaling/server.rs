@@ -1,10 +1,16 @@
 use anyhow::Result;
 use futures::{Future, StreamExt};
-use std::{pin::Pin, sync::Arc};
-use tokio::net::{TcpListener, TcpStream};
+use std::{pin::Pin, sync::Arc, time::Duration};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time::{timeout, Instant},
+};
 use volcano_sfu::rtc::config::{Config, PortMap, WebRTCTransportConfig};
 
-use crate::reference::ReferenceDb;
+use crate::{
+    reference::ReferenceDb,
+    signaling::packets::{BadRequestError, HEARTBEAT_INTERVAL},
+};
 
 use super::{
     client::Client,
@@ -34,26 +40,35 @@ type AuthFn = Box<
         + Sync,
 >;
 
+const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Launch a new signaling server
 pub async fn launch_signaling(addr: &str, config: Config, auth: AuthFn) -> Result<()> {
     // Create TCP listener
     let try_socket = TcpListener::bind(addr).await;
     let listener = try_socket.expect(&format!("Failed to bind {}", addr));
 
-    info!("Server listening on {}", listener.local_addr().expect("Server listening on <unknown ip>"));
-    
+    info!(
+        "Server listening on {}",
+        listener
+            .local_addr()
+            .expect("Server listening on <unknown ip>")
+    );
+
     //if c.turn.enabled {
     //    turn::init_turn_server(c.turn, c.turn_auth).await?;
     //}
-    
+
     let mut webrtc_config = WebRTCTransportConfig::new(&config);
-    info!("WebRTC configuration for SFU v{} loaded!", webrtc_config.version);
-    match webrtc_config.bind().await {
-        Ok(_) => {
-            match &webrtc_config.port_map {
-                PortMap::Single(port) =>
-                info!("UDP Mux network bound to port {port}"),
-                PortMap::Range(min, max) => info!("UDP Ephemeral network bound from {min} to {max} ports"),
+    info!(
+        "WebRTC configuration for SFU v{} loaded!",
+        webrtc_config.version
+    );
+    match webrtc_config.bind_udp().await {
+        Ok(_) => match &webrtc_config.port_map {
+            PortMap::Single(port) => info!("UDP Mux network bound to port {port}"),
+            PortMap::Range(min, max) => {
+                info!("UDP Ephemeral network bound from {min} to {max} ports")
             }
         },
         Err(err) => error!("Bind failed: {err}"),
@@ -76,7 +91,12 @@ pub async fn launch_signaling(addr: &str, config: Config, auth: AuthFn) -> Resul
 }
 
 /// Accept a new TCP connection
-async fn accept_connection(stream: TcpStream, auth: Arc<AuthFn>, w: Arc<WebRTCTransportConfig>, db: Arc<ReferenceDb>) {
+async fn accept_connection(
+    stream: TcpStream,
+    auth: Arc<AuthFn>,
+    w: Arc<WebRTCTransportConfig>,
+    db: Arc<ReferenceDb>,
+) {
     // Validate TCP connection
     stream
         .peer_addr()
@@ -92,7 +112,7 @@ async fn accept_connection(stream: TcpStream, auth: Arc<AuthFn>, w: Arc<WebRTCTr
     let write = Sender::new(write);
 
     // Handle any resulting errors
-    if let Err(error) = handle_connection((read, write.clone()), auth, w, db).await {
+    if let Err(error) = handle_connection((read, write), auth, w, db).await {
         error!("Connection ended with error: {error}");
     }
 }
@@ -104,58 +124,72 @@ async fn handle_connection(
     w: Arc<WebRTCTransportConfig>,
     db: Arc<ReferenceDb>,
 ) -> Result<()> {
-    // Wait until valid packet is sent
-    let mut client: Option<Client> = None;
-    while let Some(msg) = read.next().await {
-        match PacketC2S::from(&msg?) {
-            Ok(packet) => match packet {
-                PacketC2S::Connect {
-                    id,
-                    token,
-                    room_ids,
-                } => {
-                    if let Ok(user) = (auth)(token).await {
-                        info!("Authenticated user {}", user.id);
+    // Do not reset timer, on timeout end connection
+    let now = Instant::now();
 
-                        let user_id = user.id.clone();
-                        
-                        // Create a new client
-                        client = Some(Client::new(user, Arc::clone(&w), db.clone()).await?);
+    // Send Hello once.
+    write
+        .send(PacketS2C::Hello {
+            heartbeat_interval: HEARTBEAT_INTERVAL,
+        })
+        .await?;
 
-                        // Fetch rooms
-                        let available_rooms = db.fetch_available_rooms(&room_ids).await;
+    while now.elapsed() < AUTH_TIMEOUT {
+        let remaining = AUTH_TIMEOUT - now.elapsed();
+        debug!("Waiting for client authentication ({0} seconds left)", remaining.as_secs());
+        match timeout(remaining, read.next()).await {
+            Ok(Some(msg)) => {
+                if let Ok(packet) = msg.map(|m| PacketC2S::from(&m)) {
+                    match packet {
+                        Ok(request) => {
+                            match request {
+                                PacketC2S::Connect { id, token, .. } => {
+                                    if let Ok(user) = (auth)(token).await {
+                                        let user_id = user.id.clone();
 
-                        // Send inmediate response
-                        write
-                            .send(PacketS2C::Accept {
-                                id,
-                                user_id,
-                                ice_servers: w.configuration.ice_servers.clone(),
-                                available_rooms,
-                            })
-                            .await?;
+                                        let client = Client::new(user, Arc::clone(&w), db.clone());
+
+                                        // Send reply (same id)
+                                        write
+                                            .send(PacketS2C::Accept {
+                                                id,
+                                                user_id,
+                                                ice_servers: w.ice_servers.clone(),
+                                                available_rooms: Vec::default(),
+                                            })
+                                            .await?;
+
+                                        // Start client task
+                                        return client.run((read, write)).await;
+                                    }
+                                }
+
+                                // Handle Ping for unauthenticated clients too
+                                PacketC2S::Ping { data }=> {
+                                    write.send(PacketS2C::Pong { data }).await?;
+                                }
+                                _ => {
+                                    write.send(BadRequestError::Forbidden).await?;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Send parse result
+                            write.send(e).await?;
+                        }
                     }
-                    break;
                 }
-                _ => {
-                    write
-                        .send(PacketS2C::ServerError {
-                            error: ServerError::NotAuthenticated,
-                        })
-                        .await?;
+                // Message error ignored
+            }
+            // Timeout or another error
+            timeout => {
+                if timeout.is_err() {
+                    write.send(ServerError::AuthTimeout).await?;
                 }
-            },
-            Err(e) => {
-                write.send(PacketS2C::ServerError { error: e }).await?;
+                break; // End connection
             }
         }
     }
 
-    // Check if we are authenticated
-    if let Some(client) = client {
-        // Accept the new client
-        client.run((read, write)).await
-    } else {
-        Err(ServerError::FailedToAuthenticate.into())
-    }
+    write.close().await
 }
