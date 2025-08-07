@@ -1,11 +1,13 @@
 use thiserror::Error;
 use tokio_tungstenite::tungstenite::Message;
 
-use volcano_sfu::rtc::{peer::PeerConfig, room::RoomInfo};
+use volcano_sfu::rtc::{peer::{PeerConfig, PeerRole}, room::RoomInfo};
 use webrtc::{
     ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
     peer_connection::sdp::session_description::RTCSessionDescription,
 };
+
+pub(super) const HEARTBEAT_INTERVAL: u16 = 30_000; 
 
 /// Available types of media tracks
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -41,7 +43,6 @@ pub enum PacketC2S {
     Answer { description: RTCSessionDescription },
     /// Offer (from negotiation)
     Offer {
-        id: u32,
         description: RTCSessionDescription,
     },
     /// Authenticate
@@ -52,22 +53,26 @@ pub enum PacketC2S {
         /// Rooms available for client
         // TODO: use revolt database for checking
         #[serde(default = "Vec::new")]
+        #[allow(dead_code)]
         room_ids: Vec<String>,
     },
     /// Peer offers a description to a room
     Join {
-        id: u32,
         room_id: String,
-        offer: RTCSessionDescription,
+        offer: Option<RTCSessionDescription>,
         #[serde(default)]
         cfg: PeerConfig,
     },
     /// Removes current user from current room
     Leave,
+    /// Client should send Ping with a timestamp in every heartbeat.
+    Ping {
+        data: u64,
+    },
     /// Register candidate in local peer subscriber or publisher
     Trickle {
         candidate: RTCIceCandidateInit,
-        target: u8,
+        target: PeerRole,
     },
 }
 
@@ -84,8 +89,10 @@ pub enum PacketS2C {
     },
     /// Answer (for client publisher)
     Answer {
-        id: u32,
         description: RTCSessionDescription,
+    },
+    Hello {
+        heartbeat_interval: u16
     },
     RoomInfo {
         room: RoomInfo,
@@ -94,37 +101,49 @@ pub enum PacketS2C {
     Offer {
         description: RTCSessionDescription,
     },
+    /// Response to [PacketC2S::Ping]
+    Pong {
+        data: u64,
+    },
     Trickle {
         candidate: RTCIceCandidateInit,
-        target: u8,
+        target: PeerRole,
     },
-    /// Disconnection error
-    Error {
-        error: String,
-    },
-    /// Custom server error
-    ServerError {
-        error: ServerError,
-    },
+}
+
+// Incorrect format, or state
+#[derive(Debug, Error, Serialize)]
+#[serde(tag = "error", content = "reason", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BadRequestError {
+    #[error("Already connected to a room!")]
+    AlreadyConnected,
+    #[error("Bad Request. Reason: {reason}")]
+    BadFormat { reason: String },
+    #[error("Forbidden access. User is not authenticated in this session.")]
+    Forbidden,
+    #[error("Received message is not a text.")]
+    UnproccesableEntity,
+}
+
+#[derive(Debug, Error, Serialize)]
+#[serde(tag = "error", content = "reason", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LostConnectionError {
+    #[error("Lost connection to peer")]
+    PeerConnectionLost,
+    #[error("Lost connection to publisher")]
+    PublisherConnectionLost,
+    #[error("Lost connection from subscriber")]
+    SubscriberConnectionLost,
 }
 
 /// An error occurred on the server
 #[derive(Error, Debug, Serialize)]
+#[serde(tag = "error", content = "reason", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ServerError {
     #[error("This room ID does not exist.")]
     RoomNotFound,
-    #[error("Something went wrong trying to authenticate you.")]
-    FailedToAuthenticate,
-    #[error("Already connected to a room!")]
-    AlreadyConnected,
-    #[error("Not authenticated in this session.")]
-    NotAuthenticated,
-    #[error("Peer connection failed!")]
-    PeerConnectionFailed,
-    #[error("Bad Request. Reason: {reason}")]
-    BadRequest { reason: String },
-    #[error("Received message is not a text.")]
-    UnproccesableEntity,
+    #[error("Time for authentication expired.")]
+    AuthTimeout,
 }
 
 impl std::fmt::Display for MediaType {
@@ -140,7 +159,7 @@ impl std::fmt::Display for MediaType {
 
 impl PacketC2S {
     /// Create a packet from incoming Message
-    pub fn from(message: &Message) -> Result<Self, ServerError> {
+    pub fn from(message: &Message) -> Result<Self, BadRequestError> {
         if let Message::Text(text) = message {
             match serde_json::from_str(text) {
                 Ok(packet) => Ok(packet),
@@ -148,11 +167,11 @@ impl PacketC2S {
                     error!("Tried to parse packet: {text}");
                     let reason = e.to_string();
                     error!("Error: {reason}");
-                    Err(ServerError::BadRequest { reason })
+                    Err(BadRequestError::BadFormat { reason })
                 }
             }
         } else {
-            Err(ServerError::UnproccesableEntity)
+            Err(BadRequestError::UnproccesableEntity)
         }
     }
 }

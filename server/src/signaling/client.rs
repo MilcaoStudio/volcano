@@ -5,17 +5,17 @@ use futures::{TryStreamExt};
 use tokio::sync::{broadcast::error::RecvError, watch};
 use volcano_sfu::rtc::{
     config::WebRTCTransportConfig,
-    peer::{PeerConfig, PubSubPeer},
+    peer::{PeerConfig, PeerRole, PubSubPeer},
     room::Room,
 };
 use webrtc::{
     ice_transport::{
-        ice_candidate::RTCIceCandidateInit, ice_connection_state::RTCIceConnectionState,
+        ice_candidate::RTCIceCandidateInit,
     },
     peer_connection::sdp::session_description::RTCSessionDescription,
 };
 
-use crate::reference::ReferenceDb;
+use crate::{reference::ReferenceDb, signaling::packets::{BadRequestError, LostConnectionError}};
 
 use super::{
     packets::{PacketC2S, PacketS2C, ServerError},
@@ -35,16 +35,16 @@ pub struct Client {
 
 impl Client {
     /// Create a new Client for a user in a room
-    pub async fn new(user: UserInformation, config: Arc<WebRTCTransportConfig>, db: Arc<ReferenceDb>) -> Result<Self> {
+    pub fn new(user: UserInformation, config: Arc<WebRTCTransportConfig>, db: Arc<ReferenceDb>) -> Self {
         let (close_tx, close_rx) = watch::channel(false);
-        Ok(Self {
+        Self {
             close_events_tx: close_tx,
             close_events_rx: close_rx,
             db,
             user: user.clone(),
             room: None,
             peer: Arc::new(PubSubPeer::new(user.id.to_owned(), config)),
-        })
+        }
     }
 
     /// Run client lifecycle
@@ -81,14 +81,12 @@ impl Client {
                         }
                     }
                     Err(e) => match e {
-                        ServerError::BadRequest { reason } => {
+                        BadRequestError::BadFormat { reason } => {
                             write
-                                .send(PacketS2C::Error {
-                                    error: reason
-                                })
+                                .send(BadRequestError::BadFormat { reason })
                                 .await?
                         }
-                        ServerError::UnproccesableEntity => {
+                        BadRequestError::UnproccesableEntity => {
                             debug!(
                                 "msg -> {}",
                                 msg.into_text().unwrap_or_else(|e| e.to_string())
@@ -131,10 +129,15 @@ impl Client {
     async fn handle_message(&mut self, packet: PacketC2S, write: &Sender) -> Result<()> {
         let peer = self.peer.clone();
         match packet {
-            PacketC2S::Answer { description } => peer.set_remote_description(description).await,
-            PacketC2S::Connect { .. } => write.send(PacketS2C::ServerError { error: ServerError::AlreadyConnected }).await,
+            PacketC2S::Answer { description } => {
+                if let Err(err) = peer.set_remote_description(description).await {
+                    error!("[Client {0}] [On Answer] Set remote description failed: {err}", self.user.id);
+                    return write.send(LostConnectionError::SubscriberConnectionLost).await;
+                }
+                Ok(())
+            },
+            PacketC2S::Connect { .. } => write.send(BadRequestError::AlreadyConnected).await,
             PacketC2S::Join {
-                id,
                 room_id,
                 offer,
                 cfg,
@@ -144,7 +147,7 @@ impl Client {
                 let room = self.db.fetch_or_create_room(&room_id).await;
                 self.room = Some(room.clone());
 
-                self.handle_join(write.clone(), room, offer, &cfg, id).await
+                self.handle_join(write.clone(), room, offer, &cfg).await
             }
             PacketC2S::Leave => {
                 match self.room.take() {
@@ -162,10 +165,17 @@ impl Client {
                     _ => Err(ServerError::RoomNotFound.into()),
                 }
             }
-            PacketC2S::Offer { id, description } => {
-                Self::handle_offer(peer, write.clone(), description, id).await
+            PacketC2S::Offer { description } => {
+                Self::handle_offer(peer, write.clone(), description).await
             }
-            PacketC2S::Trickle { candidate, target } => peer.trickle(candidate, target).await,
+            PacketC2S::Ping { data } => write.send(PacketS2C::Pong { data }).await,
+            PacketC2S::Trickle { candidate, target } => {
+                if let Err(err) = peer.trickle(candidate, target).await {
+                    error!("[Client {0}] [On Trickle] Add candidate failed: {err}", self.user.id);
+                    return write.send(LostConnectionError::PeerConnectionLost).await;
+                };
+                Ok(())
+            },
         }
     }
 
@@ -173,15 +183,14 @@ impl Client {
         &self,
         write: Sender,
         room: Arc<Room>,
-        initial_offer: RTCSessionDescription,
+        initial_offer: Option<RTCSessionDescription>,
         cfg: &PeerConfig,
-        id: u32,
     ) -> Result<()> {
         let peer = &self.peer;
         let sender = Arc::new(write);
         let sender_1 = Arc::downgrade(&sender);
         let sender_2 = Arc::downgrade(&sender);
-        let sender_3 = Arc::downgrade(&sender);
+        //let sender_3 = Arc::downgrade(&sender);
         peer.on_offer(Box::new(move |offer| {
             let sender_in = sender_1.clone();
             Box::pin(async move {
@@ -195,7 +204,7 @@ impl Client {
         .await;
 
         peer.on_ice_candidate(Box::new(
-            move |candidate: RTCIceCandidateInit, target: u8| {
+            move |candidate: RTCIceCandidateInit, target: PeerRole| {
                 let sender_in = sender_2.clone();
                 Box::pin(async move {
                     if let Some(s) = sender_in.upgrade() {
@@ -212,48 +221,40 @@ impl Client {
         let peer_id = peer.id().clone();
         peer.register_on_ice_connection_state_change(Box::new(move |state| {
             let peer_id_in = peer_id.clone();
-            let sender_in = sender_3.clone();
             Box::pin(async move {
                 debug!(
                     "[Publisher {}] ICE connection state changed to: {}",
                     peer_id_in, state
                 );
-                if state == RTCIceConnectionState::Failed {
-                    if let Some(s) = sender_in.upgrade() {
-                        if let Err(err) = s.send(PacketS2C::ServerError { error: ServerError::PeerConnectionFailed, }).await {
-                            error!("Send ServerError failed: {err}");
-                        };
-                    }
-                }
+                // Do nothing
             })
         }))
         .await;
 
         if let Err(err) = peer.join(room.clone(), cfg).await {
             error!("join error: {}", err);
-            return Err(err);
+            return Err(err.into());
         }
 
-        match peer.answer(initial_offer).await {
-            Ok(answer) => {
-                // Sends back request id
-                sender
-                    .send(PacketS2C::Answer {
-                        id,
-                        description: answer,
-                    })
-                    .await?;
-            }
-            Err(err) => {
-                // Client should know error
-                sender
-                    .send(PacketS2C::Error {
-                        error: err.to_string(),
-                    })
-                    .await?;
-                error!("answer error: {}", err);
-            }
-        };
+        if let Some(offer) = initial_offer {
+            match peer.answer(offer).await {
+                Ok(answer) => {
+                    // Sends back request id
+                    sender
+                        .send(PacketS2C::Answer {
+                            description: answer,
+                        })
+                        .await?;
+                }
+                Err(err) => {
+                    error!("answer error: {}", err);
+                    // Client should know error
+                    sender
+                        .send(LostConnectionError::PublisherConnectionLost)
+                        .await?;
+                }
+            };
+        }
 
         // Set up subscriber... on join?
         if !cfg.no_subscribe {
@@ -321,20 +322,18 @@ impl Client {
         peer: Arc<PubSubPeer>,
         write: Sender,
         offer: RTCSessionDescription,
-        id: u32,
     ) -> Result<()> {
         match peer.answer(offer).await {
             Ok(answer) => {
                 write
                     .send(PacketS2C::Answer {
-                        id,
                         description: answer,
                     })
                     .await
             }
             Err(err) => {
                 error!("answer error: {}", err);
-                Err(err)
+                write.send(LostConnectionError::PublisherConnectionLost).await
             }
         }
     }
