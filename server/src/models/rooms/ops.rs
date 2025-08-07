@@ -1,5 +1,5 @@
 use std::{sync::Arc};
-use volcano_sfu::rtc::{room::{Room, RoomInfo}};
+use volcano_sfu::rtc::{room::Room};
 
 use crate::reference::ReferenceDb;
 
@@ -20,15 +20,5 @@ impl ReferenceDb {
             rooms.insert(id.to_string(), room.clone());
             room
         }}
-    }
-    
-    pub async fn fetch_available_rooms(&self, ids: &Vec<String>) -> Vec<RoomInfo> {
-        let mut available_rooms = Vec::new();
-        for id in ids {
-            if let Some(room) = self.fetch_room(id).await {
-                available_rooms.push(room.get_room_info())
-            }
-        }
-        available_rooms
     }
 }
