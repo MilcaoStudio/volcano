@@ -188,16 +188,14 @@ impl Client {
     ) -> Result<()> {
         let peer = &self.peer;
         let sender = Arc::new(write);
-        let sender_1 = Arc::downgrade(&sender);
-        let sender_2 = Arc::downgrade(&sender);
+        let sender_1 = sender.clone();
+        let sender_2 = sender.clone();
         //let sender_3 = Arc::downgrade(&sender);
         peer.on_offer(Box::new(move |offer| {
             let sender_in = sender_1.clone();
             Box::pin(async move {
-                if let Some(s) = sender_in.upgrade() {
-                    if let Err(err) = s.send(PacketS2C::Offer { description: offer }).await {
-                        error!("Send Offer failed: {err}");
-                    };
+                if let Err(err) = sender_in.send(PacketS2C::Offer { description: offer }).await {
+                    error!("Send Offer failed: {err}");
                 }
             })
         }))
@@ -207,13 +205,11 @@ impl Client {
             move |candidate: RTCIceCandidateInit, target: PeerRole| {
                 let sender_in = sender_2.clone();
                 Box::pin(async move {
-                    if let Some(s) = sender_in.upgrade() {
-                        if let Err(err) = s.send(PacketS2C::Trickle { candidate, target })
-                            .await
-                        {
-                            error!("Send Trickle failed: {err}");
-                        };
-                    }
+                    if let Err(err) = sender_in.send(PacketS2C::Trickle { candidate, target })
+                        .await {
+                        error!("Send Trickle failed: {err}");
+                    };
+                    
                 })
             },
         ))
