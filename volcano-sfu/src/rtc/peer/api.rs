@@ -21,6 +21,7 @@ const MUTED_VALUE: &str = "none";
 /// Creates a new basic [RTCPeerConnection] using default codecs and interceptors.
 /// # Configuration
 /// Subscriber connection is configured with:
+/// - [WebRTCTransportConfig::setting] for setting engine.
 /// - ICE Servers from [WebRTCTransportConfig::configuration]
 pub async fn create_subscriber_connection(cfg: &Arc<WebRTCTransportConfig>) -> Result<Arc<RTCPeerConnection>> {
     // Create a MediaEngine object to configure the supported codec
@@ -33,11 +34,12 @@ pub async fn create_subscriber_connection(cfg: &Arc<WebRTCTransportConfig>) -> R
     // for each PeerConnection.
     let registry = register_default_interceptors(Registry::new(), &mut m)?;
 
+    let setting_engine = cfg.setting.clone();
     // Create the API object with the MediaEngine
     let api = APIBuilder::new()
         .with_media_engine(m)
         .with_interceptor_registry(registry)
-        //.with_setting_engine()
+        .with_setting_engine(setting_engine)
         .build();
 
     // Create a new RTCPeerConnection
@@ -53,7 +55,7 @@ pub async fn create_subscriber_connection(cfg: &Arc<WebRTCTransportConfig>) -> R
 /// Creates a new [RTCPeerConnection] using the default codecs, default interceptos and the provided [WebRTCTransportConfig].
 /// # Configuration
 /// Publisher connection is configured with:
-/// - [WebRTCTransportConfig::setting] for the media engine.
+/// - [WebRTCTransportConfig::setting] for setting engine.
 /// - [WebRTCTransportConfig::configuration] for the peer connection.
 pub async fn create_publisher_connection(cfg: WebRTCTransportConfig) -> Result<Arc<RTCPeerConnection>> {
     let mut m = MediaEngine::default();
@@ -62,6 +64,7 @@ pub async fn create_publisher_connection(cfg: WebRTCTransportConfig) -> Result<A
     set_header_extensions(&mut m);
 
     let setting_engine = cfg.setting.clone();
+    debug!("Building publisher peer connection without default interceptors.");
     let api = APIBuilder::new()
             .with_media_engine(m)
             .with_setting_engine(setting_engine)
@@ -76,7 +79,7 @@ pub async fn create_publisher_connection(cfg: WebRTCTransportConfig) -> Result<A
 /// Creates a new [RTCPeerConnection] using the default codecs, default interceptos and the provided [WebRTCTransportConfig].
 /// # Configuration
 /// Central connection is configured with:
-/// - [WebRTCTransportConfig::setting] for the media engine.
+/// - [WebRTCTransportConfig::setting] for setting engine.
 /// - [WebRTCTransportConfig::configuration] for the peer connection.
 pub async fn create_central_connection(cfg: Arc<WebRTCTransportConfig>) -> Result<Arc<RTCPeerConnection>> {
     let mut m = MediaEngine::default();
