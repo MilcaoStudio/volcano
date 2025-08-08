@@ -41,6 +41,7 @@ pub async fn create_subscriber_connection(cfg: &Arc<WebRTCTransportConfig>) -> R
         .build();
 
     // Create a new RTCPeerConnection
+    debug!("Creating subscriber configuration with servers {:?}", cfg.configuration.ice_servers);
     api.new_peer_connection(RTCConfiguration {
         ice_servers: cfg.configuration.ice_servers.clone(),
         ..Default::default()
@@ -65,6 +66,8 @@ pub async fn create_publisher_connection(cfg: WebRTCTransportConfig) -> Result<A
             .with_media_engine(m)
             .with_setting_engine(setting_engine)
             .build();
+    
+    debug!("Creating publisher configuration with servers {:?}", cfg.configuration.ice_servers);
     api.new_peer_connection(cfg.configuration)
         .await
         .map(Arc::new)

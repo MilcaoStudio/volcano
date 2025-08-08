@@ -221,19 +221,20 @@ impl WebRTCTransportConfig {
         se.set_ice_timeouts(disconnected_timeout, failed_timeout, keep_alive_interval);
 
         if let Some(nat1toiips) = c.webrtc.candidates.nat1_to_1ips.clone() {
-            if !nat1toiips.is_empty() {
+            let has_ips = nat1toiips.is_empty();
+            if !has_ips {
                 debug!("SFU config: Set {:?} for NAT 1-to-1 [Host]", nat1toiips);
                 se.set_nat_1to1_ips(nat1toiips, RTCIceCandidateType::Host);
             }
-        }
 
-        let mdns = if c.webrtc.mdns {
-            MulticastDnsMode::QueryAndGather
-        } else {
-            MulticastDnsMode::Disabled
-        };
-        
-        se.set_ice_multicast_dns_mode(mdns);
+            // Disable mDNS when using 1to1
+            let mdns = if c.webrtc.mdns && !has_ips {
+                MulticastDnsMode::QueryAndGather
+            } else {
+                MulticastDnsMode::Disabled
+            };
+            se.set_ice_multicast_dns_mode(mdns);
+        }
 
         let candidates = &c.webrtc.candidates;
         let network_types = if candidates.disable_ipv6 {
@@ -250,7 +251,14 @@ impl WebRTCTransportConfig {
         se.set_network_types(network_types);
 
         WebRTCTransportConfig {
-            configuration: RTCConfiguration::default(),
+            configuration: RTCConfiguration {
+                ice_servers: if !ice_lite {
+                    ice_servers.clone()
+                } else {
+                    Vec::default()
+                },
+                ..Default::default()
+            },
             ice_servers,
             setting: se,
             router: c.router.clone(),
