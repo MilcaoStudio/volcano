@@ -20,8 +20,11 @@ COPY config.example.toml /etc/volcano/config.toml
 # Signaling server port
 EXPOSE 4000/tcp
 
-# TURN server port
-#EXPOSE 3478/udp
+# Expose the UDP Mux socket port
+# EXPOSE 50000/udp
+
+# Or, expose the ephemeral network
+# EXPOSE 50000-50100/udp
 
 ENV RUST_LOG=debug
 WORKDIR /etc/volcano
