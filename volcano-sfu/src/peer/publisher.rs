@@ -4,18 +4,20 @@ use anyhow::Result;
 use tokio::sync::Mutex;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
+use webrtc::peer_connection::signaling_state::RTCSignalingState;
+use webrtc::peer_connection::OnDataChannelHdlrFn;
 use webrtc::peer_connection::{RTCPeerConnection, sdp::session_description::RTCSessionDescription};
 use webrtc::rtcp::packet::Packet as RtcpPacket;
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::RTCRtpTransceiver;
 use webrtc::track::track_remote::TrackRemote;
 
-use crate::rtc::config::WebRTCTransportConfig;
-use crate::rtc::room::{Room};
+use crate::session::config::WebRTCTransportConfig;
+use crate::session::room::Room;
 use crate::track::receiver::Receiver;
 use crate::track::router::LocalRouter;
 
-use super::{api, OnICEConnectionStateChangeFn};
+use super::{api, Error, OnICEConnectionStateChangeFn};
 
 pub struct Publisher {
     id: String,
@@ -29,6 +31,7 @@ pub struct Publisher {
     session_version: AtomicU64,
 
     ice_connection_state_change_handler: Arc<Mutex<Option<OnICEConnectionStateChangeFn>>>,
+    //on_data_channel: Arc<Mutex<Option<OnDataChannelHdlrFn>>>,
 }
 
 #[derive(Clone)]
@@ -60,6 +63,7 @@ impl Publisher {
             room,
             candidates: Arc::new(Mutex::new(Vec::new())),
             ice_connection_state_change_handler: Arc::default(),
+            //on_data_channel: Arc::default(),
             session_version: AtomicU64::default(),
         };
 
@@ -81,18 +85,26 @@ impl Publisher {
         Ok(())
     }
 
-    pub async fn answer(&self, offer: RTCSessionDescription) -> Result<RTCSessionDescription, webrtc::Error> {
+    /// 1. Updates current session version (if it is higher than last one, cleans up the candidates)
+    /// 2. Sets remote description from offer
+    /// 3. Adds stored candidates in peer connection
+    /// 4. Create answer and sets local descriptions
+    /// # Returns
+    /// Answer session description created
+    pub async fn on_remote_offer(&self, offer: RTCSessionDescription) -> Result<RTCSessionDescription, Error> {
+         if self.pc.signaling_state() != RTCSignalingState::Stable {
+            return Err(Error::ErrOfferIgnored);
+        }
+
         let mut candidates = self.candidates.lock().await;
 
-        if let Some(current_session) = self.pc.current_remote_description().await
-            .and_then(|desc| desc.unmarshal().ok()) {
-                if let Some(new_session) = offer.unmarshal().ok() {
-                    if new_session.origin.session_version > current_session.origin.session_version {
-                        candidates.clear();
-                        debug!("This offer contains a new session version. Candidates are cleaned up.");
-                    }
-                }
-                self.session_version.store(current_session.origin.session_version, Ordering::Relaxed);
+        let current_session_version = self.session_version.load(Ordering::SeqCst);
+        if let Some(new_session) = offer.unmarshal().ok() {
+            if new_session.origin.session_version > current_session_version {
+                candidates.clear();
+                debug!("This offer contains a new session version. Candidates are cleaned up.");
+            }
+            self.session_version.store(new_session.origin.session_version, Ordering::SeqCst);
         }
 
         self.pc.set_remote_description(offer).await?;
@@ -141,9 +153,9 @@ impl Publisher {
         let router_out = Arc::clone(&self.router);
         //let router_out_2 = Arc::clone(&self.router);
         let room_out = self.room.clone();
-        let room_out_2 = self.room.clone();
+        //let room_out_2 = self.room.clone();
         let tracks_out = Arc::clone(&self.tracks);
-        let peer_id_out_2 = self.id.clone();
+        //let peer_id_out_2 = self.id.clone();
         let user_id_out = self.id.clone();
         //let pc_out = self.pc.clone();
 
@@ -168,7 +180,7 @@ impl Publisher {
                     let receiver_clone = r.clone();
                     if publish {
                         if let Some(room) = room_in.upgrade() {
-                            room.publish_track(&router_in, r).await;
+                            room.publish_track(&router_in, r.clone()).await;
                         } else {
                             warn!("Publish track failed.");
                         }
@@ -196,23 +208,6 @@ impl Publisher {
             })
         );
 
-        self.pc.on_data_channel(Box::new(move |channel| {
-            let room_in = room_out_2.clone();
-            let id_in = peer_id_out_2.clone();
-            // Ignore our default channel, exists to force ICE candidates. See signalPair for more info
-            if channel.label() == super::API_CHANNEL_LABEL {
-                info!("[Publisher {id_in}] API data channel published from client!");
-                return Box::pin(async move {
-                    //room_in.add_api_channel(&id_in).await;
-                });
-            }
-            Box::pin(async move {
-                if let Some(room) = room_in.upgrade() {
-                    room.add_data_channel(&id_in, channel).await;
-                }
-            })
-        }));
-
         let on_ice_connection_state_change_clone = self.ice_connection_state_change_handler.clone();
         self.pc.on_ice_connection_state_change(Box::new(move |s| {
             let handler_in = Arc::clone(&on_ice_connection_state_change_clone);
@@ -239,6 +234,10 @@ impl Publisher {
         tokio::spawn(async move {
             router_clone.send_rtcp().await;
         });
+    }
+
+    pub async fn on_data_channel(&self, f: OnDataChannelHdlrFn) {
+        self.pc.on_data_channel(f);
     }
 
     pub fn router(&self) -> Arc<LocalRouter> {

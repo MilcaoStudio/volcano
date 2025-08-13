@@ -8,7 +8,6 @@ use tokio::sync::Mutex;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::{Duration, sleep};
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::rtcp::goodbye::Goodbye;
 use webrtc::rtcp::header::PacketType;
 use webrtc::rtcp::packet::Packet as RtcpPacket;
@@ -16,18 +15,19 @@ use webrtc::rtcp::sender_report::SenderReport;
 use webrtc::rtcp::source_description::SourceDescription;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
-use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-use webrtc::rtp_transceiver::{RTCPFeedback, RTCRtpTransceiverInit};
+use webrtc::rtp_transceiver::RTCPFeedback;
 use webrtc::track::track_remote::TrackRemote;
 
-use super::downtrack::{DownTrack, DownTrackInternal};
+use super::downtrack::DownTrack;
 use super::error::Result;
 use super::receiver::{Receiver, RtcpDataReceiver, RtcpDataSender, WebRTCReceiver};
-use crate::buffer::Options as BufferOptions;
-use crate::rtc::peer::{self, Subscriber};
-use crate::rtc::room::{Room, RoomEvent};
+use crate::packet::Options as PacketOptions;
+use crate::peer::{self, Consumer};
+use crate::session::config::RouterConfig;
+use crate::session::room::{Room, RoomEvent};
 use crate::track::audio_observer::AudioObserver;
-use crate::{buffer::AtomicFactory, buffer::BufferIO, rtc::config::RouterConfig};
+use crate::track::error::Error;
+use crate::{packet::AtomicFactory, packet::BufferIO};
 
 pub type RtcpWriterFn = Box<
     dyn (FnMut(
@@ -126,27 +126,17 @@ impl LocalRouter {
     /// - `Err(Error)` if the track could not be added (e.g. the receiver is closed).
     pub async fn add_down_track(
         &self,
-        subscriber: Arc<Subscriber>,
+        consumer: Arc<dyn Consumer + Send + Sync>,
         receiver: Arc<WebRTCReceiver>,
     ) -> Result<Arc<DownTrack>> {
-        let downtracks = subscriber.get_tracks(&receiver.stream_id()).await;
-        // Checks for available tracks
-        if let Some(downtracks_data) = downtracks {
-            for dt in downtracks_data {
-                // Returns track if exists
-                if dt.id() == receiver.track_id() {
-                    info!("LocalRouter::add_down_track Downtrack exists");
-                    return Ok(dt);
-                }
-            }
+        let existing_dt = consumer.down_track_by_id(&receiver.track_id());
+        // Checks for existing track
+        if let Some(dt) = existing_dt {
+            info!("LocalRouter::add_down_track Downtrack exists");
+            return Ok(dt);
         }
 
         let codec = receiver.codec();
-        subscriber
-            .m
-            .lock()
-            .await
-            .register_codec(codec.clone(), receiver.kind())?;
         let codec_capability = RTCRtpCodecCapability {
             mime_type: codec.capability.mime_type,
             clock_rate: codec.capability.clock_rate,
@@ -168,78 +158,42 @@ impl LocalRouter {
             ],
         };
         
-        // New local down track
-        let down_track_local = Arc::new(DownTrackInternal::new(
-            codec_capability,
-            &receiver,
-            self.config.max_packet_track,
-        ));
-        let transceiver = subscriber
-            .pc
-            .add_transceiver_from_track(
-                down_track_local.clone(),
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Sendonly,
-                    send_encodings: Vec::new(),
-                }),
-            )
-            .await?;
-        info!(
-            "[Subscriber {}] {} transceivers",
-            subscriber.id,
-            subscriber.pc.get_transceivers().await.len()
-        );
-        // New local track
-        let mut down_track = DownTrack::new_track_local(subscriber.id.clone(), down_track_local);
-        down_track.set_transceiver(transceiver.clone());
-        let down_track_arc = Arc::new(down_track);
+        let down_track_arc = match consumer.new_local_track(codec_capability, &receiver).await {
+            Ok(dt) => dt,
+            Err(peer::Error::ErrRTC(err)) => {
+                return Err(err.into());
+            }
+            Err(err) => {
+                error!("new local track error {err}");
+                return Err(Error::ErrInvalidTrack);
+            }
+        };
 
-        let s_out = subscriber.clone();
-        let r_out = receiver.clone();
+        let s_out = consumer.clone();
         let down_track_out = down_track_arc.clone();
         down_track_arc
             .register_on_close(Box::new(move || {
                 let s_in = s_out.clone();
-                let r_in = r_out.clone();
-                let transceiver_in = transceiver.clone();
                 let down_track_in = down_track_out.clone();
                 Box::pin(async move {
-                    if s_in.pc.connection_state() != RTCPeerConnectionState::Closed {
-                        // Remove track from subscriber peer connection
-                        match s_in.pc.remove_track(&transceiver_in.sender().await).await {
-                            Ok(_) => {
-                                info!("Remove DownTrack for {}", &r_in.stream_id());
-                                s_in.remove_down_track(&r_in.stream_id(), &down_track_in)
-                                    .await;
-
-                                // Force negotiation
-                                if let Err(err) = s_in.negotiate(None).await {
-                                    error!("Negotiation for track removed failed:{} ", err);
-                                }
-                            }
-                            Err(err) => {
-                                error!("remove_down_track err: {}", err);
-                            }
-                        }
-                    }
+                    let _ = s_in.unsubscribe_track(&down_track_in.id()).await;
                 })
             }))
             .await;
-
+        /*
         let s_out_1 = subscriber.clone();
-        let r_out_1 = receiver.clone();
+        let sid_out = receiver.stream_id();
+        
         down_track_arc
             .register_on_bind(Box::new(move || {
                 let s_in = s_out_1.clone();
-                let r_in = r_out_1.clone();
-
+                let stream_id = sid_out.clone();
                 Box::pin(async move {
-                    tokio::spawn(async move {
-                        s_in.send_stream_down_track_reports(&r_in.stream_id()).await;
-                    });
+                    s_in.send_reports_by_stream(&stream_id).await;
                 })
             }))
             .await;
+        */
 
         info!(
             "[Router {}] Local track {} created",
@@ -247,9 +201,7 @@ impl LocalRouter {
             down_track_arc.id()
         );
 
-        subscriber
-            .add_down_track(receiver.stream_id(), down_track_arc.clone())
-            .await;
+        // subscriber.add_down_track moved to subscriber.create_down_track
 
         receiver
             .add_down_track(
@@ -272,22 +224,15 @@ impl LocalRouter {
     /// - `Err(Error)` if the operation failed (e.g. subscriber's negotiation failed).
     pub async fn add_down_tracks(
         &self,
-        subscriber: Arc<Subscriber>,
+        subscriber: Arc<dyn Consumer + Send + Sync>,
         receiver: Option<Arc<WebRTCReceiver>>,
     ) -> peer::Result<bool> {
         let mut should_negotiate = false;
-        if subscriber.no_auto_subscribe {
-            info!(
-                "Router[{}] add_down_tracks Subscriber skips [no_auto_subscribe]",
-                self.id
-            );
-            return Ok(should_negotiate);
-        }
-
+        let consumer_id = subscriber.id();
         if let Some(receiver) = receiver {
             info!(
                 "[Router {}] add_down_tracks Subscriber {} adds a downtrack from receiver",
-                self.id, subscriber.id
+                self.id, consumer_id
             );
             if let Err(err) = self.add_down_track(subscriber.clone(), receiver).await {
                 error!("add_down_track err: {}", err);
@@ -299,7 +244,7 @@ impl LocalRouter {
         if !recs.is_empty() {
             info!(
                 "[Router {}] Subscriber {} adds downtracks from stored receivers",
-                self.id, subscriber.id
+                self.id, consumer_id
             );
             for val in recs.iter() {
                 if let Err(err) = self.add_down_track(subscriber.clone(), val.clone()).await {
@@ -494,7 +439,7 @@ impl LocalRouter {
         buffer
             .bind(
                 rtp_receiver.get_parameters().await,
-                BufferOptions {
+                PacketOptions {
                     max_bitrate: self.config.max_bandwidth,
                 },
             )

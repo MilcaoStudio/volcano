@@ -9,10 +9,6 @@ pub enum Error {
     /// Transport established is required but not established
     #[error("no rtc transport exists for this peer")]
     ErrNoTransportEstablished,
-    #[error("no publisher exists for this peer")]
-    ErrNoPublisher,
-    #[error("no subscriber exists for this peer")]
-    ErrNoSubscriber,
     /// Offer received in unstable state
     #[error("offer ignored")]
     ErrOfferIgnored,

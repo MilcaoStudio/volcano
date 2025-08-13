@@ -17,7 +17,7 @@ use webrtc::{
     },
 };
 
-use crate::buffer::AtomicFactory;
+use crate::packet::AtomicFactory;
 
 #[cfg(feature = "turn")]
 use crate::turn::TurnConfig;

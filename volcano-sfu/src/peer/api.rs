@@ -8,7 +8,7 @@ use webrtc::{
     }, data_channel::{data_channel_init::RTCDataChannelInit, RTCDataChannel}, error::Result, interceptor::registry::Registry, peer_connection::{configuration::RTCConfiguration, RTCPeerConnection}, rtp_transceiver::rtp_codec::{RTCRtpHeaderExtensionCapability, RTPCodecType}, sdp::extmap, track::track_local::TrackLocal
 };
 
-use crate::{rtc::{config::WebRTCTransportConfig, message::RemoteMedia}, track::downtrack::DownTrack};
+use crate::{session::config::WebRTCTransportConfig, track::{downtrack::DownTrack, message::RemoteMedia}};
 use super::API_CHANNEL_LABEL;
 
 const FRAME_MARKING: &str = "urn:ietf:params:rtp-hdrext:framemarking";

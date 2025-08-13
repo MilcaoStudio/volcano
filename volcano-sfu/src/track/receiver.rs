@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use tokio::sync::mpsc::{self, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex};
 use webrtc::error::Error as RTCError;
 use webrtc::rtcp::packet::Packet as RtcpPacket;
 
@@ -19,7 +19,7 @@ use webrtc::track::track_remote::TrackRemote;
 use webrtc::util::Unmarshal;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 
-use crate::buffer::{AtomicBuffer, VP8};
+use crate::packet::{AtomicBuffer, VP8};
 use crate::track::sequencer::AtomicSequencer;
 
 use super::downtrack::{DownTrack, DownTrackType};
@@ -126,7 +126,7 @@ pub trait Receiver: Send + Sync {
         pkts: Vec<Box<dyn RtcpPacket + Send + Sync>>,
         last_ssrc: u32,
         ssrc: u32,
-        sequencer: Arc<Mutex<AtomicSequencer>>,
+        sequencer: &AtomicSequencer,
     );
     
     /// Retransmits all given packets into a given [DownTrack].
@@ -422,7 +422,7 @@ impl Receiver for WebRTCReceiver {
         pkts: Vec<Box<dyn RtcpPacket + Send + Sync>>,
         last_ssrc: u32,
         ssrc: u32,
-        sequencer: Arc<Mutex<AtomicSequencer>>,
+        sequencer: &AtomicSequencer,
     ) {
         use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
         use webrtc::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
@@ -492,10 +492,10 @@ impl Receiver for WebRTCReceiver {
                 let mut nacked_packets: Vec<PacketMeta> = Vec::new();
                 for pair in &transport_layer_nack.nacks {
                     let seq_numbers = pair.packet_list();
-                    let sequencer2 = sequencer.lock().await;
-                    let mut pairs= sequencer2.get_seq_no_pairs(&seq_numbers[..]).await;
+                    let mut pairs= sequencer.get_seq_no_pairs(&seq_numbers[..]).await;
                     nacked_packets.append(&mut pairs);
                 }
+                
 
                 warn!("Packet retransmition disabled. Could not retransmit {} packets.", nacked_packets.len());
              //   receiver.retransmit_packets(track, packets)
@@ -625,8 +625,8 @@ impl Receiver for WebRTCReceiver {
                         Ok(mut p) => {
                             p.header.sequence_number = packet.target_seq_no;
                             p.header.timestamp = packet.timestamp;
-                            p.header.ssrc = track.ssrc().await;
-                            p.header.payload_type = track.payload_type().await;
+                            p.header.ssrc = track.ssrc();
+                            p.header.payload_type = track.payload_type();
 
                             let mut payload = BytesMut::new();
                             payload.extend_from_slice(&p.payload.slice(..));

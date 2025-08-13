@@ -5,8 +5,10 @@ extern crate serde;
 extern crate log;
 
 /// Process and store incoming RTP & RTCP packets
-pub mod buffer;
-pub mod rtc;
+pub mod packet;
+pub mod controllers;
+pub mod peer;
+pub mod session;
 pub mod track;
 pub mod stats;
 

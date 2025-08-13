@@ -2,6 +2,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use webrtc::{
+    data_channel::RTCDataChannel,
     ice_transport::ice_candidate::RTCIceCandidateInit,
     peer_connection::{
         OnICEConnectionStateChangeHdlrFn, offer_answer_options::RTCOfferOptions,
@@ -9,69 +10,33 @@ use webrtc::{
     },
 };
 
+#[cfg(test)]
+pub(crate) mod peer_test;
+
 pub mod api;
-mod central;
+mod consumer;
 mod error;
 mod publisher;
-mod pubsub;
 mod subscriber;
 
-pub use central::CentralPeer;
 pub use error::Error;
 pub use error::Result;
 pub use publisher::Publisher;
-pub use pubsub::PubSubPeer;
 pub use subscriber::Subscriber;
+pub use consumer::Consumer;
 
 pub const API_CHANNEL_LABEL: &str = "System";
 
 pub type OnICEConnectionStateChangeFn = OnICEConnectionStateChangeHdlrFn;
 
-pub type OnOfferFn = Box<
-    dyn (FnMut(RTCSessionDescription) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
-        + Send
-        + Sync,
->;
-
-pub type OnPubSubICECandidateFn = Box<
-    dyn (FnMut(RTCIceCandidateInit, PeerRole) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
-        + Send
-        + Sync,
->;
-
-pub type OnICECandidateFn = Box<
-    dyn (FnMut(RTCIceCandidateInit) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
-        + Send
-        + Sync,
->;
-
-pub type OnNegotiateFn = Box<
-    dyn (FnMut(Option<RTCOfferOptions>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>)
-        + Send
-        + Sync,
->;
-use serde_repr::{Deserialize_repr, Serialize_repr};
-
-#[derive(Clone, Copy, Debug, Serialize_repr, Deserialize_repr)]
-#[repr(u8)]
-pub enum PeerRole {
-    Publisher,
-    Subscriber,
-}
-
-/// Peer configuration for enabling/disabling the publisher and/or the subscriber
-#[derive(Debug, Default, Deserialize)]
-pub struct PeerConfig {
-    pub no_publish: bool,
-    pub no_subscribe: bool,
-    pub no_auto_subscribe: bool,
-}
-
 use std::sync::Arc;
 
-use super::room::Room;
 #[async_trait]
 pub trait Peer: Send + Sync {
+    /// Adds a candidate to this peer.
+    /// If the connection does not have a remote description yet, candidates must be stored until [Self::answer] is called.
+    async fn add_ice_candidate(&self, candidate: RTCIceCandidateInit) -> Result<()>;
+
     /// Sets remote and local descriptions for this peer. If this fails, a new offer should be created from client side.
     ///
     /// If there are candidates awaiting to be added, they should be added to the peer connection and cleaned up.
@@ -80,10 +45,15 @@ pub trait Peer: Send + Sync {
     /// Cleans up the peer connection and closes it.
     async fn clean_up(&self);
 
-    /// Joins a room.
-    ///
-    /// A new peer connection should be created and this peer should be added to the room.
-    async fn join(self: &Arc<Self>, room: Arc<Room>) -> Result<()>;
+    /// Creates a [RTCDataChannel] from a label.
+    /// The caller of this method should call [Self::negotitate] once to prevent pending negotiations.
+    async fn create_data_channel(&self, label: String) -> Result<Arc<RTCDataChannel>>;
+
+    /// Gets a [RTCDataChannel] by label, or None.
+    async fn get_data_channel(&self, label: &str) -> Option<Arc<RTCDataChannel>>;
+
+    /// Peer Id
+    fn id(&self) -> String;
 
     /// Starts negotiation process.
     ///
@@ -96,3 +66,21 @@ pub trait Peer: Send + Sync {
     /// Sets a function to be called when current peer connection's state changes.
     async fn set_on_ice_connection_state_change(&self, f: OnICEConnectionStateChangeFn);
 }
+
+pub type OnOfferFn = Box<
+    dyn (Fn(RTCSessionDescription) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
+        + Send
+        + Sync,
+>;
+
+pub type OnICECandidateFn = Box<
+    dyn (Fn(RTCIceCandidateInit) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>)
+        + Send
+        + Sync,
+>;
+
+pub type OnNegotiateFn = Box<
+    dyn (Fn(Option<RTCOfferOptions>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>)
+        + Send
+        + Sync,
+>;

@@ -19,10 +19,9 @@ use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_local::TrackLocalContext;
 use webrtc::track::track_local::TrackLocalWriter;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
-use crate::buffer::AtomicFactory;
-use crate::buffer::ExtPacket;
+use crate::packet::{AtomicFactory, ExtPacket};
 use crate::track::receiver::WebRTCReceiver;
 
 use super::codec_parameters_fuzzy_search;
@@ -33,10 +32,10 @@ use super::set_vp8_temporal_layer;
 use super::simulcast::SimulcastTrackHelpers;
 
 pub type OnCloseFn =
-    Box<dyn (FnMut() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync>;
+    Box<dyn (Fn() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync>;
 
 pub type OnBindFn =
-    Box<dyn (FnMut() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync>;
+    Box<dyn (Fn() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync>;
 
 #[derive(Default, Clone)]
 pub enum DownTrackType {
@@ -68,24 +67,24 @@ pub struct DownTrackInternal {
     id: String,
     rid: String,
     bound: AtomicBool,
-    mime: Mutex<String>,
-    ssrc: Mutex<u32>,
+    mime: RwLock<String>,
+    ssrc: Arc<AtomicU32>,
     stream_id: String,
     max_track: u32,
-    payload_type: Mutex<u8>,
-    sequencer: Arc<Mutex<AtomicSequencer>>,
+    payload_type: AtomicU8,
+    sequencer: Arc<RwLock<AtomicSequencer>>,
     buffer_factory: AtomicFactory,
     /// Whether the track is enabled (unmuted).
-    pub enabled: AtomicBool,
+    pub enabled: Arc<AtomicBool>,
     /// Whether the track is re-synced.
-    pub re_sync: AtomicBool,
-    last_ssrc: AtomicU32,
+    pub re_sync: Arc<AtomicBool>,
+    last_ssrc: Arc<AtomicU32>,
     /// Codec capability of the track.
     pub codec: RTCRtpCodecCapability,
     /// Receiver of the track.
     pub receiver: Weak<WebRTCReceiver>,
-    write_stream: Mutex<Option<Arc<dyn TrackLocalWriter + Send + Sync>>>,
-    on_bind_handler: Arc<Mutex<Option<OnBindFn>>>,
+    write_stream: RwLock<Option<Arc<dyn TrackLocalWriter + Send + Sync>>>,
+    on_bind_handler: Arc<RwLock<Option<OnBindFn>>>,
 }
 
 impl DownTrackInternal {
@@ -95,25 +94,25 @@ impl DownTrackInternal {
             id: r.track_id(),
             rid: r.track_rid(),
             bound: AtomicBool::default(),
-            mime: Mutex::default(),
-            ssrc: Mutex::default(),
+            mime: Default::default(),
+            ssrc: Default::default(),
             stream_id: r.stream_id(),
             max_track,
-            payload_type: Mutex::default(),
-            sequencer: Mutex::new(AtomicSequencer::new(max_track)).into(),
+            payload_type: Default::default(),
+            sequencer: RwLock::new(AtomicSequencer::new(max_track)).into(),
             buffer_factory: AtomicFactory::default(),
-            enabled: AtomicBool::default(),
-            re_sync: AtomicBool::default(),
-            last_ssrc: AtomicU32::default(),
+            enabled: Default::default(),
+            re_sync: Default::default(),
+            last_ssrc: Default::default(),
             receiver:  Arc::downgrade(r),
-            write_stream: Mutex::default(),
+            write_stream: Default::default(),
             on_bind_handler: Arc::default(),
         }
     }
 
     /// Registers a function to be called when the track is bound.
     pub async fn on_bind(&self, f: OnBindFn) {
-        let mut handler = self.on_bind_handler.lock().await;
+        let mut handler = self.on_bind_handler.write().await;
         *handler = Some(f);
     }
 }
@@ -134,36 +133,39 @@ impl TrackLocal for DownTrackInternal {
 
         let codec = codec_parameters_fuzzy_search(parameters, t.codec_parameters())?;
 
-        let mut ssrc = self.ssrc.lock().await;
-        *ssrc = t.ssrc();
-        let mut payload_type = self.payload_type.lock().await;
-        *payload_type = codec.payload_type;
-        let mut write_stream = self.write_stream.lock().await;
+        self.ssrc.store(t.ssrc(), Ordering::Release);
+        self.payload_type.store(codec.payload_type, Ordering::Release);
+        self.re_sync.store(true, Ordering::Release);
+        self.enabled.store(true, Ordering::Release);
+        
+        let mut write_stream = self.write_stream.write().await;
         *write_stream = Some(t.write_stream());
-        let mut mime = self.mime.lock().await;
+        let mut mime = self.mime.write().await;
         *mime = codec.capability.mime_type.to_lowercase();
-        self.re_sync.store(true, Ordering::Relaxed);
-        self.enabled.store(true, Ordering::Relaxed);
 
         let rtcp = self.buffer_factory.get_or_new_rtcp_buffer(t.ssrc()).await;
 
-        let enabled = self.enabled.load(Ordering::Relaxed);
-        let last_ssrc = self.last_ssrc.load(Ordering::Relaxed);
-
-        let ssrc_val = *ssrc;
-
         let sequencer = self.sequencer.clone();
         let receiver = self.receiver.clone();
+        let enabled_out = self.enabled.clone();
+        let last_ssrc_out = self.last_ssrc.clone();
+        let ssrc_out = self.last_ssrc.clone();
 
         rtcp.set_on_packets(Box::new(move |pkts| {
             let sqncr_in = sequencer.clone();
             let rcvr_in = receiver.clone();
+            let enabled = enabled_out.clone();
+            let last_ssrc_in = last_ssrc_out.clone();
+            let ssrc_in = ssrc_out.clone();
             Box::pin(async move {
-                if let Some(rcvr) = rcvr_in.upgrade() {
-                    if enabled {
-                        rcvr.handle_rtcp(pkts, last_ssrc, ssrc_val, sqncr_in).await;
+                if let Some(receiver) = rcvr_in.upgrade() {
+                    if enabled.load(Ordering::Acquire) {
+                        let sequencer = sqncr_in.read().await;
+                        let last_ssrc = last_ssrc_in.load(Ordering::Acquire);
+                        let ssrc = ssrc_in.load(Ordering::Acquire);
+                        receiver.handle_rtcp(pkts, last_ssrc, ssrc, &sequencer).await;
                     } else {
-                        trace!("[Track {}] Cannot send RTCP because track is muted.", rcvr.track_id())
+                        trace!("[Track {}] Cannot send RTCP because track is muted.", receiver.track_id())
                     }
                 }
             })
@@ -171,12 +173,12 @@ impl TrackLocal for DownTrackInternal {
         .await;
 
         if self.codec.mime_type.starts_with("video/") {
-            let mut sequencer = self.sequencer.lock().await;
+            let mut sequencer = self.sequencer.write().await;
             *sequencer = AtomicSequencer::new(self.max_track);
         }
 
-        let mut handler = self.on_bind_handler.lock().await;
-        if let Some(f) = &mut *handler {
+        let handler = self.on_bind_handler.read().await;
+        if let Some(f) = handler.as_ref() {
             f().await;
         }
         self.bound.store(true, Ordering::Relaxed);
@@ -217,7 +219,9 @@ impl TrackLocal for DownTrackInternal {
     }
 }
 pub struct DownTrack {
-    peer_id: String,
+    /// Canonical name defined by RFC 3550 6.5.1
+    cname: String,
+    //peer_id: String,
     track_type: Mutex<DownTrackType>,
     /// Packet payload stored in buffer.
     pub payload: Vec<u8>,
@@ -273,11 +277,11 @@ impl DownTrack {
     pub fn new(
         c: RTCRtpCodecCapability,
         r: &Arc<WebRTCReceiver>,
-        peer_id: String,
+        cname: String,
         max_track: u32,
     ) -> Self {
         Self {
-            peer_id,
+            cname,
             track_type: Mutex::new(DownTrackType::SimpleDownTrack),
             payload: Vec::new(),
             current_spatial_layer: AtomicU8::default(),
@@ -317,33 +321,25 @@ impl DownTrack {
 
     /// Creates a source description chunk for the track.
     /// # Returns
-    /// A vector of source description chunks, or None if the track is not bound.
-    pub async fn create_source_description_chunks(&self) -> Option<Vec<SourceDescriptionChunk>> {
+    /// A vector of source description chunks, may be empty
+    pub async fn create_source_description_chunks(&self) -> Vec<SourceDescriptionChunk> {
         use webrtc::rtcp::source_description::{SourceDescriptionItem, SdesType::SdesCname};
 
         if !self.bound() {
-            return None;
+            return Vec::default();
         }
+        
+        let ssrc = self.ssrc();
 
-        let mid = self.transceiver.as_ref().unwrap().mid().unwrap();
-        let ssrc = *self.down_track_local.ssrc.lock().await;
-
-        Some(vec![
+        vec![
             SourceDescriptionChunk {
                 source: ssrc,
                 items: vec![SourceDescriptionItem {
                     sdes_type: SdesCname,
-                    text: Bytes::copy_from_slice(self.down_track_local.stream_id.as_bytes()),
-                }],
-            },
-            SourceDescriptionChunk {
-                source: ssrc,
-                items: vec![SourceDescriptionItem {
-                    sdes_type: SdesCname,
-                    text: Bytes::copy_from_slice(mid.as_bytes()),
-                }],
-            },
-        ])
+                    text: Bytes::copy_from_slice(self.cname.as_bytes()),
+                }]
+            }
+        ]
     }
 
     /// Current spatial layer of the track.
@@ -358,7 +354,7 @@ impl DownTrack {
 
     /// Mime type of the track.
     pub async fn mime(&self) -> String {
-        self.down_track_local.mime.lock().await.clone()
+        self.down_track_local.mime.read().await.clone()
     }
 
     /// # Arguments
@@ -374,9 +370,9 @@ impl DownTrack {
     }
 
     /// Creates a new simple `DownTrack` from a `DownTrackInternal` and the ID of the peer where this belongs to.
-    pub fn new_track_local(peer_id: String, track: Arc<DownTrackInternal>) -> Self {
+    pub fn new_track_local(cname: String, track: Arc<DownTrackInternal>) -> Self {
         Self {
-            peer_id,
+            cname,
             track_type: Mutex::new(DownTrackType::SimpleDownTrack),
             payload: Vec::default(),
 
@@ -407,8 +403,8 @@ impl DownTrack {
     }
 
     /// Payload type of the track.
-    pub async fn payload_type(&self) -> u8 {
-        *self.down_track_local.payload_type.lock().await
+    pub fn payload_type(&self) -> u8 {
+        self.down_track_local.payload_type.load(Ordering::Acquire)
     }
 
     /// Registers a function to be called when the track is bound.
@@ -472,9 +468,8 @@ impl DownTrack {
     }
 
     /// SSRC of the track.
-    pub async fn ssrc(&self) -> u32 {
-        let ssrc = self.down_track_local.ssrc.lock().await;
-        *ssrc
+    pub fn ssrc(&self) -> u32 {
+        self.down_track_local.ssrc.load(Ordering::Acquire)
     }
 
     /// Atomically switches the spatial layer of the track.
@@ -579,8 +574,8 @@ impl DownTrack {
 
     /// Writes a raw RTP packet directly to the track.
     pub async fn write_raw_rtp(&self, pkt: rtp::packet::Packet) -> Result<()> {
-        let write_stream_val = self.down_track_local.write_stream.lock().await;
-        if let Some(write_stream) = &*write_stream_val {
+        let write_stream_val = self.down_track_local.write_stream.read().await;
+        if let Some(write_stream) = write_stream_val.as_ref() {
             write_stream.write_rtp(&pkt).await?;
         }
 
@@ -626,7 +621,7 @@ impl DownTrack {
     }
 
     async fn forward_simple_rtp(&self, ext_packet: &mut ExtPacket) -> Result<()> {
-        let ssrc = *self.down_track_local.ssrc.lock().await;
+        let ssrc = self.ssrc();
 
         if self.down_track_local.re_sync.load(Ordering::Relaxed) {
             match self.down_track_local.kind() {
@@ -705,7 +700,7 @@ impl DownTrack {
                 .header
                 .timestamp
                 .saturating_sub(*self.ts_offset.lock().await);
-            let sequencer = self.down_track_local.sequencer.lock().await;
+            let sequencer = self.down_track_local.sequencer.read().await;
             sequencer
                 .push(
                     ext_packet.packet.header.sequence_number,
@@ -715,7 +710,7 @@ impl DownTrack {
                     ext_packet.head,
                 )
                 .await;
-            let cur_payload_type = *self.down_track_local.payload_type.lock().await;
+            let cur_payload_type = self.down_track_local.payload_type.load(Ordering::Acquire);
             if ext_packet.head {
                 let mut last_sn = self.last_sn.lock().await;
                 *last_sn = new_sn;
@@ -729,7 +724,7 @@ impl DownTrack {
             header.ssrc = ssrc;
         }
 
-        let write_stream_val = self.down_track_local.write_stream.lock().await;
+        let write_stream_val = self.down_track_local.write_stream.read().await;
         if let Some(write_stream) = &*write_stream_val {
             self.packet_sent_count
                 .fetch_add(1, Ordering::SeqCst);
@@ -752,7 +747,7 @@ impl DownTrack {
             return Ok(());
         }
 
-        let ssrc = *self.down_track_local.ssrc.lock().await;
+        let ssrc = self.ssrc();
 
         let last_ssrc = self.down_track_local.last_ssrc.load(Ordering::Relaxed);
         let temporal_supported: bool;
@@ -781,8 +776,8 @@ impl DownTrack {
                 }
 
                 if simulcast.temporal_supported {
-                    let mime = self.down_track_local.mime.lock().await.clone();
-                    if mime == *"video/vp8" {
+                    let mime = self.down_track_local.mime.read().await;
+                    if mime.as_str() == "video/vp8" {
                         let vp8 = ext_packet.payload;
                         simulcast.p_ref_pic_id = simulcast.l_pic_id;
                         simulcast.ref_pic_id = vp8.picture_id;
@@ -815,8 +810,8 @@ impl DownTrack {
                 *last_ts = ext_packet.packet.header.timestamp;
                 let mut last_sn = self.last_sn.lock().await;
                 *last_sn = ext_packet.packet.header.sequence_number;
-                let mime = self.down_track_local.mime.lock().await.clone();
-                if mime == *"video/vp8" {
+                let mime = self.down_track_local.mime.read().await;
+                    if mime.as_str() == "video/vp8" {
                     let vp8 = ext_packet.payload;
                     simulcast.temporal_supported = vp8.temporal_supported;
                 }
@@ -831,8 +826,8 @@ impl DownTrack {
         let _tlz0_idx: u8 = 0;
 
         if temporal_supported {
-            let mime = self.down_track_local.mime.lock().await.clone();
-            if mime == *"video/vp8" {
+            let mime = self.down_track_local.mime.read().await;
+            if mime.as_str() == "video/vp8" {
                 let (_a, _b, _c, _d) = set_vp8_temporal_layer(&ext_packet, self).await;
             }
         }
@@ -854,10 +849,10 @@ impl DownTrack {
         hdr.sequence_number = new_sn;
         hdr.timestamp = new_ts;
         hdr.ssrc = ssrc;
-        hdr.payload_type = *self.down_track_local.payload_type.lock().await;
+        hdr.payload_type = self.down_track_local.payload_type.load(Ordering::Acquire);
 
-        let write_stream_val = self.down_track_local.write_stream.lock().await;
-        if let Some(write_stream) = &*write_stream_val {
+        let write_stream_val = self.down_track_local.write_stream.read().await;
+        if let Some(write_stream) = write_stream_val.as_ref() {
             trace!(
                 "Sending packet to write stream (simulcast) [layer {layer}] {:?}",
                 ext_packet
@@ -876,7 +871,7 @@ impl DownTrack {
 
 impl PartialEq for DownTrack {
     fn eq(&self, other: &Self) -> bool {
-        (self.peer_id == other.peer_id) && (self.down_track_local == other.down_track_local)
+        (self.cname == other.cname) && (self.down_track_local == other.down_track_local)
     }
 }
 
@@ -885,7 +880,7 @@ impl Debug for DownTrack {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DownTrack")
             .field("id", &self.id())
-            .field("peer_id", &self.peer_id)
+            .field("cname", &self.cname)
             .field("track_type", &self.track_type)
             .field("current_spatial_layer", &self.current_spatial_layer)
             .field("target_spatial_layer", &self.target_spatial_layer)
