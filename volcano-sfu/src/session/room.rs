@@ -368,7 +368,7 @@ impl Room {
                 continue;
             }
 
-            let Ok(sub) = peer.consumer().await else {
+            let Some(sub) = peer.consumer().await else {
                 warn!(
                     "[Room {}] Expected peer {} consumer. Got none.",
                     self.id, peer_id

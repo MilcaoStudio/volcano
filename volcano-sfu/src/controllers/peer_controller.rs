@@ -11,7 +11,7 @@ use super::Result;
 pub trait PeerController: Send + Sync + 'static {
 
     /// Peer consumer receives remote tracks and creates local tracks.
-    async fn consumer(&self) -> Result<Arc<dyn Consumer + Send + Sync>>;
+    async fn consumer(&self) -> Option<Arc<dyn Consumer + Send + Sync>>;
 
     /// Cleans up the peer connection and closes it.
     async fn close(&self);

@@ -1,10 +1,7 @@
 use std::{
-    future::Future,
-    pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    future::Future, pin::Pin, sync::{
+        atomic::{AtomicBool, Ordering}, Arc
+    }
 };
 
 use async_trait::async_trait;
@@ -258,10 +255,10 @@ impl PeerController for PubSubController {
         Ok(())
     }
 
-    async fn consumer(&self) -> Result<Arc<dyn Consumer + Send + Sync>> {
+    async fn consumer(&self) -> Option<Arc<dyn Consumer + Send + Sync>> {
         match self.subscriber.lock().await.as_ref() {
-            Some(subscriber) => Ok(subscriber.clone()),
-            _ => Err(PeerControllerError::ErrNoConsumer),
+            Some(subscriber) => Some(subscriber.clone()),
+            None => None,
         }
     }
 

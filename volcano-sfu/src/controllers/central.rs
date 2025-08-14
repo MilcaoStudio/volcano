@@ -499,10 +499,10 @@ impl PeerController for CentralController {
         Ok(())
     }
 
-    async fn consumer(&self) -> Result<Arc<dyn Consumer + Send + Sync>> {
+    async fn consumer(&self) -> Option<Arc<dyn Consumer + Send + Sync>> {
         match self.consumer.lock().await.as_ref() {
-            Some(consumer) => Ok(consumer.clone()),
-            _ => Err(PeerControllerError::ErrNoConsumer),
+            Some(consumer)=> Some(consumer.clone()),
+            None => None,
         }
     }
 
