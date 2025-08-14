@@ -20,6 +20,8 @@ pub enum Error {
     // ErrTurnNoneAuthKey
     #[error("cannot get auth key from user map")]
     ErrTurnNoneAuthKey,
+    #[error("received track is not valid")]
+    ErrInvalidTrack,
     #[error("webrtc error {0}")]
     ErrWebRTC(RTCError),
     #[error("rtcp error {0}")]
