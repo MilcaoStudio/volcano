@@ -1,25 +1,28 @@
 use std::any::Any;
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc::{self, Sender};
-use tokio::sync::{Mutex};
-use webrtc::error::Error as RTCError;
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::Instant;
 use webrtc::rtcp::packet::Packet as RtcpPacket;
 
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp::packet::Packet as RTCPacket;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecParameters, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::track::track_remote::TrackRemote;
 use webrtc::util::Unmarshal;
-use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 
-use crate::packet::{AtomicBuffer, VP8};
+use crate::packet::rtcp::RTCPForwarder;
+use crate::packet::{AtomicBuffer, BufferIO, Options as PacketOptions, VP8};
 use crate::track::sequencer::AtomicSequencer;
 
 use super::downtrack::{DownTrack, DownTrackType};
@@ -31,7 +34,36 @@ pub type RtcpDataReceiver = mpsc::Receiver<Vec<Box<dyn RtcpPacket + Send + Sync>
 pub type RtcpDataSender = mpsc::Sender<Vec<Box<dyn RtcpPacket + Send + Sync>>>;
 
 pub type OnCloseHandlerFn =
-    Box<dyn (FnMut() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync>;
+    Box<dyn (Fn() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>) + Send + Sync>;
+
+// esto reemplaza agrupa todos los fields mutables en un struct que deberia ser mutable
+struct ReceiverLayer {
+    // acumula memoria, y el proceso de limpieza ocupa mas memoria
+    disposed_tracks: Mutex<Vec<Arc<DownTrack>>>,
+    // todos los downtracks emiten el mismo rtp, no tocar
+    down_tracks: Mutex<Vec<Arc<DownTrack>>>,
+    // no implementado, pero serviria para indicar el layer en u8
+    spatial: AtomicU8,
+    // lee paquetes RTP desde uptrack
+    rtp_reader: Arc<AtomicBuffer>,
+    // lee paquetes RTCP desde uptrack
+    rtcp_reader: Arc<RTCPForwarder>,
+    // track remoto recibido por el upstream (publisher) no tocar
+    up_track: Arc<TrackRemote>,
+}
+
+impl ReceiverLayer {
+    async fn remove_down_track(&self, id: &str, close_if_removed: bool) {
+        let mut down_tracks = self.down_tracks.lock().await;
+        if let Some(idx) = down_tracks.iter().position(|dt| dt.id() == id) {
+            let dt = down_tracks.swap_remove(idx);
+            drop(down_tracks);
+            if close_if_removed {
+                dt.close().await;
+            }
+        }
+    }
+}
 
 /// Receiver of a media track in an RTP/RTCP context.
 ///
@@ -40,7 +72,6 @@ pub type OnCloseHandlerFn =
 /// scalable video coding (SVC), or peer-to-peer streaming architectures.
 #[async_trait]
 pub trait Receiver: Send + Sync {
-
     /// track_id is the unique identifier for this receiver's tracks.
     fn track_id(&self) -> String;
 
@@ -85,7 +116,8 @@ pub trait Receiver: Send + Sync {
     async fn add_up_track(
         &self,
         track: Arc<TrackRemote>,
-        buffer: Arc<AtomicBuffer>,
+        rtp_reader: Arc<AtomicBuffer>,
+        rtcp_reader: Arc<RTCPForwarder>,
         best_quality_first: bool,
     ) -> Option<usize>;
 
@@ -109,10 +141,10 @@ pub trait Receiver: Send + Sync {
     async fn get_bitrates(&self) -> Vec<u64>;
 
     /// Gets the next available layer for the next track.
-    /// 
+    ///
     /// # Arguments
     /// - `best_quality_first`: If true, returns the highest quality layer available. Otherwise, returns the lowest available.
-    /// 
+    ///
     /// # Returns
     /// - Layer index (0-2) if an available layer is found for a simulcast track.
     /// - Layer 0 for a simple track.
@@ -128,18 +160,19 @@ pub trait Receiver: Send + Sync {
         ssrc: u32,
         sequencer: &AtomicSequencer,
     );
-    
+
     /// Retransmits all given packets into a given [DownTrack].
     /// # Arguments
     /// - `track`: [DownTrack] used to retransmit packets.
     /// - `packets`: Packets to retransmit.
-    async fn retransmit_packets(&self, track: Arc<DownTrack>, packets: &[PacketMeta]) -> Result<()>;
+    async fn retransmit_packets(&self, track: Arc<DownTrack>, packets: &[PacketMeta])
+    -> Result<()>;
 
     /// Deletes and closes a [DownTrack] from a given layer.
     /// # Arguments
     /// - `layer`: Layer of the down track.
     /// - `id`: ID of the down track.
-    async fn delete_down_track(&self, layer: usize, id: String) -> Result<()>;
+    async fn delete_down_track(&self, layer: usize, id: &str) -> Result<()>;
 
     /// Registers a function to be called when the receiver is closed.
     async fn register_on_close(&self, f: OnCloseHandlerFn);
@@ -168,30 +201,27 @@ pub trait Receiver: Send + Sync {
     /// Converts the receiver into a `dyn Any` object for dynamic downcasting.
     fn as_any(&self) -> &(dyn Any + Send + Sync);
 
-    /// Awaits for incoming packets from a given layer and forwards them.
-    /// 
-    /// ## Blocking
-    /// It is recommended to use this function inside an async task.
+    /// Awaits for an incoming packet from a given layer and forwards them to down tracks.
     ///
     /// # Arguments
-    /// - `layer`: Target layer.
+    /// - `layer`: Layer to listen.
     ///
     /// # Returns
     /// A `Result<()>` indicating success or failure.
-    async fn write_rtp(&self, layer: usize) -> Result<()>;
+    async fn forward_rtp_packet(&self, layer: usize) -> Result<()>;
 }
 
 /// A wrapper around an RTCRtpReceiver that provides additional functionality for handling incoming media packets.
-/// 
+///
 /// It contains 3 layers for simulcast tracks. For simple tracks, a single layer (#0) is used.
 /// Each layer is associated with a DownTrack, a buffer, a remote track, and a set of pending tracks.
 /// # Examples
 /// ```
 /// use std::sync::Arc;
 /// use webrtc::{api::APIBuilder, error::Result, peer_connection::configuration::RTCConfiguration, rtp_transceiver::{RTCRtpTransceiver, rtp_receiver::RTCRtpReceiver}, track::track_remote::TrackRemote};
-/// 
+///
 /// use volcano_sfu::track::receiver::WebRTCReceiver;
-/// 
+///
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     let api = APIBuilder::new().build();
@@ -211,24 +241,25 @@ pub struct WebRTCReceiver {
     closed: AtomicBool,
     #[allow(dead_code)]
     bandwidth: u64,
-    last_pli: AtomicU64,
+    last_pli: Mutex<Option<Instant>>,
     #[allow(dead_code)]
     stream: String,
     pub receiver: Arc<RTCRtpReceiver>,
     codec: RTCRtpCodecParameters,
     rtcp_sender: Arc<RtcpDataSender>,
-    buffers: Arc<Mutex<[Option<Arc<AtomicBuffer>>; 3]>>,
-    up_tracks: Arc<Mutex<[Option<Arc<TrackRemote>>; 3]>>,
-    available: Arc<Mutex<[AtomicBool; 3]>>,
-    down_tracks: [Arc<Mutex<Vec<Arc<DownTrack>>>>; 3],
-    pending: [AtomicBool; 3],
-    pending_tracks: [Arc<Mutex<Vec<Arc<DownTrack>>>>; 3],
+    //buffers: Arc<Mutex<[Option<Arc<AtomicBuffer>>; 3]>>,
+    //up_tracks: Arc<Mutex<[Option<Arc<TrackRemote>>; 3]>>,
+    //available: Arc<Mutex<[AtomicBool; 3]>>,
+    //down_tracks: [Arc<Mutex<Vec<Arc<DownTrack>>>>; 3],
+    //pending: [AtomicBool; 3],
+    //pending_tracks: [Arc<Mutex<Vec<Arc<DownTrack>>>>; 3],
+    // Muta al agregar uptrack, el layer deberia usar arc + mutex interno para conservar estado
+    layers: Arc<RwLock<[Option<Arc<ReceiverLayer>>; 3]>>,
     is_simulcast: bool,
     on_close_handler: Arc<Mutex<Option<OnCloseHandlerFn>>>,
 }
 
 impl WebRTCReceiver {
-
     pub fn new(receiver: Arc<RTCRtpReceiver>, track: Arc<TrackRemote>, pid: String) -> Self {
         let (s, _) = tokio::sync::mpsc::channel(1024);
         Self {
@@ -242,36 +273,88 @@ impl WebRTCReceiver {
             is_simulcast: !track.rid().is_empty(),
             closed: AtomicBool::default(),
             bandwidth: 0,
-            last_pli: AtomicU64::default(),
+            last_pli: Default::default(),
             stream: String::default(),
             rtcp_sender: Arc::new(s),
-            buffers: Arc::default(),
-            up_tracks: Arc::default(),
-            available: Arc::default(),
-            down_tracks: Default::default(),
-            pending: Default::default(),
-            pending_tracks: Default::default(),
+            //buffers: Arc::default(),
+            //up_tracks: Arc::default(),
+            //available: Arc::default(),
+            //down_tracks: Default::default(),
+            //pending: Default::default(),
+            //pending_tracks: Default::default(),
+            layers: Default::default(),
             on_close_handler: Arc::default(), // ..Default::default()
         }
     }
 
-    pub(super) fn is_recent_pli(&self) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+    pub async fn init_rtp_read(&self, layer: usize, options: PacketOptions) -> Result<()> {
+        let layer_data = self
+            .layer(layer)
+            .await
+            .ok_or(Error::ReceiverLayerNotAvailable(layer))?;
+        let buffer = layer_data.rtp_reader.clone();
+        let track = layer_data.up_track.clone();
 
-        let threshold: u64 = 500;
-
-        // Last PLI is recent (<500 milliseconds), do not send rtcp
-        if now - self.last_pli.load(Ordering::Relaxed) < threshold {
-            return true;
+        if !buffer.bound() {
+            buffer
+                .bind(self.receiver.get_parameters().await, options)
+                .await;
         }
-        
-        // Store current time as last PLI
-        self.last_pli.store(now, Ordering::Relaxed);
-        false
+
+        tokio::spawn(async move {
+            while let Ok((pkt, _)) = track.read_rtp().await {
+                buffer.write(pkt).await;
+            }
+        });
+        Ok(())
     }
+
+    pub async fn init_rtcp_read(&self, layer: usize) -> Result<()> {
+        let layer_data = self
+            .layer(layer)
+            .await
+            .ok_or(Error::ReceiverLayerNotAvailable(layer))?;
+        let receiver = self.receiver.clone();
+        let reader = layer_data.rtcp_reader.clone();
+
+        tokio::spawn(async move {
+            while let Ok((pkt, _)) = receiver.read_rtcp().await {
+                reader.send_packets(pkt).await;
+            }
+        });
+        Ok(())
+    }
+
+    pub(super) async fn is_recent_pli(&self, threshold: Duration) -> bool {
+        let mut last_pli_sent = self.last_pli.lock().await;
+
+        let now = Instant::now();
+        
+        match last_pli_sent.as_ref() {
+            Some(last) => {
+                if now.duration_since(*last) < threshold {
+                    true
+                } else {
+                    *last_pli_sent = Some(now);
+                    false
+                }
+            },
+            None => {
+                *last_pli_sent = Some(now);
+                false
+            }
+        }
+    }
+
+    async fn layer(&self, layer: usize) -> Option<Arc<ReceiverLayer>> {
+        match self.layers.read().await.get(layer) {
+            Some(existing) => existing.clone(),
+            None => None,
+        }
+    }
+
+    // Note: layer_mut method removed as it cannot return a mutable reference
+    // that outlives the RwLock guard. Use direct access to self.layers.write().await instead.
 }
 #[async_trait]
 impl Receiver for WebRTCReceiver {
@@ -297,8 +380,8 @@ impl Receiver for WebRTCReceiver {
     }
     async fn ssrc(&self, layer: usize) -> u32 {
         if layer < 3 {
-            if let Some(track) = &self.up_tracks.lock().await[layer] {
-                return track.ssrc();
+            if let Some(layer_data) = &self.layer(layer).await {
+                return layer_data.up_track.ssrc();
             }
         }
 
@@ -308,7 +391,8 @@ impl Receiver for WebRTCReceiver {
     async fn add_up_track(
         &self,
         track: Arc<TrackRemote>,
-        buffer: Arc<AtomicBuffer>,
+        rtp_reader: Arc<AtomicBuffer>,
+        rtcp_reader: Arc<RTCPForwarder>,
         best_quality_first: bool,
     ) -> Option<usize> {
         if self.closed.load(Ordering::Acquire) {
@@ -322,51 +406,63 @@ impl Receiver for WebRTCReceiver {
             _ => 0,
         };
 
-        let up_tracks = &mut self.up_tracks.lock().await;
-        up_tracks[layer] = Some(track);
-        let buffers = &mut self.buffers.lock().await;
-        buffers[layer] = Some(buffer);
-        let available = &mut self.available.lock().await;
-        available[layer] = AtomicBool::new(true);
+        let mut layers = self.layers.write().await;
 
-        let down_tracks_clone = self.down_tracks.clone();
+        // Create or update the layer
+        let layer_data = ReceiverLayer {
+            disposed_tracks: Default::default(),
+            down_tracks: Default::default(),
+            spatial: AtomicU8::new(layer as u8),
+            rtp_reader,
+            rtcp_reader,
+            up_track: track,
+        };
+
+        layers[layer] = Some(Arc::new(layer_data));
+
+        let layers_clone = self.layers.clone();
         let sub_best_quality = |target_layer| async move {
-            for down_tracks in down_tracks_clone.iter().take(target_layer) {
-                let mut down_tracks_val = down_tracks.lock().await;
-                if down_tracks_val.is_empty() {
-                    continue;
-                }
-                for d in &mut *down_tracks_val {
-                    if let Err(err) = d.switch_spatial_layer(target_layer as u8, false).await {
-                        error!("switch_spatial_layer err: {}", err);
+            let layers = layers_clone.read().await;
+            for i in 0..target_layer {
+                if let Some(Some(layer_data)) = layers.get(i) {
+                    for d in layer_data.down_tracks.lock().await.deref() {
+                        if let Err(err) =
+                            d.set_target_spatial_layer(target_layer as u8, false).await
+                        {
+                            error!("switch_spatial_layer err: {}", err);
+                        }
                     }
+                    // TODO: apply changes for i layer
                 }
             }
         };
 
-        let down_tracks_clone_2 = self.down_tracks.clone();
+        let layers_clone_2 = self.layers.clone();
         let sub_lowest_quality = |target_layer: usize| async move {
+            let layers = layers_clone_2.read().await;
             for l in (target_layer + 1..3).rev() {
-                let mut dts = down_tracks_clone_2[l].lock().await;
-                if dts.is_empty() {
-                    continue;
-                }
-                for d in &mut *dts {
-                    if let Err(err) = d.switch_spatial_layer(target_layer as u8, false).await {
-                        error!("switch_spatial_layer err: {}", err);
+                if let Some(Some(layer_data)) = layers.get(l) {
+                    for d in layer_data.down_tracks.lock().await.deref() {
+                        if let Err(err) =
+                            d.set_target_spatial_layer(target_layer as u8, false).await
+                        {
+                            error!("switch_spatial_layer err: {}", err);
+                        }
                     }
                 }
             }
         };
 
         if self.is_simulcast {
-            if best_quality_first
-                && (self.available.lock().await[2].load(Ordering::Relaxed) || layer == 2)
-            {
+            let layers = self.layers.read().await;
+            let layer_2_available = layers[2].is_some();
+            let layer_0_available = layers[0].is_some();
+
+            if best_quality_first && (layer_2_available || layer == 2) {
+                drop(layers); // Release the lock before calling async closure
                 sub_best_quality(layer).await;
-            } else if !best_quality_first
-                && (self.available.lock().await[0].load(Ordering::Relaxed) || layer == 0)
-            {
+            } else if !best_quality_first && (layer_0_available || layer == 0) {
+                drop(layers); // Release the lock before calling async closure
                 sub_lowest_quality(layer).await;
             }
         }
@@ -378,7 +474,7 @@ impl Receiver for WebRTCReceiver {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::ReceiverClosed);
         }
-        
+
         let layer = self.get_available_layer(best_quality_first).await;
 
         let track_id = track.id();
@@ -400,7 +496,9 @@ impl Receiver for WebRTCReceiver {
             );
         } else {
             if self.down_track_subscribed(layer, track.clone()).await {
-                warn!("Track {track_id} already subscribed. If you wish to replace it, please delete the down track with same ID from layer #0");
+                warn!(
+                    "Track {track_id} already subscribed. If you wish to replace it, please delete the down track with same ID from layer #0"
+                );
                 return Err(Error::DuplicatedTrack(layer));
             }
 
@@ -412,10 +510,17 @@ impl Receiver for WebRTCReceiver {
             );
         }
 
-        self.store_down_track(layer, track).await;
-        Ok(())
+        match self.store_down_track(layer, track).await {
+            Ok(len) => {
+                debug!(
+                    "[Receiver {}] Track stored. Layer {layer} contains {len} tracks.",
+                    self.peer_id
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
-
 
     async fn handle_rtcp(
         &self,
@@ -429,7 +534,6 @@ impl Receiver for WebRTCReceiver {
         use webrtc::rtcp::receiver_report::ReceiverReport;
         use webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 
-
         let mut fwd_pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> = Vec::new();
         let mut pli_once = true;
         let mut fir_once = true;
@@ -442,24 +546,20 @@ impl Receiver for WebRTCReceiver {
         }
 
         for pkt in &pkts {
-            if let Some(picture_loss_indication) = pkt
-                    .as_any()
-                    .downcast_ref::<PictureLossIndication>()
-                {
-                    if pli_once {
-                        let mut pli = picture_loss_indication.clone();
-                        pli.media_ssrc = last_ssrc;
-                        pli.sender_ssrc = ssrc;
-
-                        fwd_pkts.push(Box::new(pli));
-                        pli_once = false;
-                    }
-                }
-            else if let Some(full_intra_request) = pkt
-                    .as_any()
-                    .downcast_ref::<FullIntraRequest>()
+            if let Some(picture_loss_indication) =
+                pkt.as_any().downcast_ref::<PictureLossIndication>()
             {
-                if fir_once{
+                if pli_once {
+                    let mut pli = picture_loss_indication.clone();
+                    pli.media_ssrc = last_ssrc;
+                    pli.sender_ssrc = ssrc;
+
+                    fwd_pkts.push(Box::new(pli));
+                    pli_once = false;
+                }
+            } else if let Some(full_intra_request) = pkt.as_any().downcast_ref::<FullIntraRequest>()
+            {
+                if fir_once {
                     let mut fir = full_intra_request.clone();
                     fir.media_ssrc = last_ssrc;
                     fir.sender_ssrc = ssrc;
@@ -467,39 +567,36 @@ impl Receiver for WebRTCReceiver {
                     fwd_pkts.push(Box::new(fir));
                     fir_once = false;
                 }
-            }
-            else if let Some(receiver_estimated_max_bitrate) = pkt
-                    .as_any()
+            } else if let Some(receiver_estimated_max_bitrate) =
+                pkt.as_any()
                     .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
-                    {
-                if expected_min_bitrate == 0 || expected_min_bitrate > receiver_estimated_max_bitrate.bitrate as u64{
+            {
+                if expected_min_bitrate == 0
+                    || expected_min_bitrate > receiver_estimated_max_bitrate.bitrate as u64
+                {
                     expected_min_bitrate = receiver_estimated_max_bitrate.bitrate as u64;
-
                 }
-            }
-            else if let Some(receiver_report) = pkt.as_any().downcast_ref::<ReceiverReport>(){
-
-                for r in &receiver_report.reports{
-                    if max_rate_packet_loss == 0 || max_rate_packet_loss < r.fraction_lost{
+            } else if let Some(receiver_report) = pkt.as_any().downcast_ref::<ReceiverReport>() {
+                for r in &receiver_report.reports {
+                    if max_rate_packet_loss == 0 || max_rate_packet_loss < r.fraction_lost {
                         max_rate_packet_loss = r.fraction_lost;
                     }
-
                 }
-
-            }
-            else if let Some(transport_layer_nack) = pkt.as_any().downcast_ref::<TransportLayerNack>()
+            } else if let Some(transport_layer_nack) =
+                pkt.as_any().downcast_ref::<TransportLayerNack>()
             {
                 let mut nacked_packets: Vec<PacketMeta> = Vec::new();
                 for pair in &transport_layer_nack.nacks {
                     let seq_numbers = pair.packet_list();
-                    let mut pairs= sequencer.get_seq_no_pairs(&seq_numbers[..]).await;
+                    let mut pairs = sequencer.get_seq_no_pairs(&seq_numbers[..]).await;
                     nacked_packets.append(&mut pairs);
                 }
-                
 
-                warn!("Packet retransmition disabled. Could not retransmit {} packets.", nacked_packets.len());
-             //   receiver.retransmit_packets(track, packets)
-
+                warn!(
+                    "Packet retransmition disabled. Could not retransmit {} packets.",
+                    nacked_packets.len()
+                );
+                //   receiver.retransmit_packets(track, packets)
             }
         }
 
@@ -509,26 +606,28 @@ impl Receiver for WebRTCReceiver {
             }
         }
     }
-    
+
     async fn switch_down_track(&self, track: Arc<DownTrack>, layer: usize) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::ReceiverClosed);
         }
 
-        if self.available.lock().await[layer].load(Ordering::Relaxed) {
-            info!("[Down track {}] Marked as pending", track.id());
-            self.pending[layer].store(true, Ordering::Relaxed);
-            self.pending_tracks[layer].lock().await.push(track);
-            return Ok(());
-        }
-        
-        Err(Error::ReceiverLayerNotAvailable(layer))
+        let layer_data = self
+            .layer(layer)
+            .await
+            .ok_or(Error::ReceiverLayerNotAvailable(layer))?;
+
+        info!("[Down track {}] Marked as pending", track.id());
+
+        layer_data.disposed_tracks.lock().await.push(track);
+        Ok(())
     }
 
     async fn get_bitrates(&self) -> Vec<u64> {
         let mut bitrates = Vec::new();
-        for buff in (*self.buffers.lock().await).iter().flatten() {
-            bitrates.push(buff.bitrate().await)
+        let layers = self.layers.read().await;
+        for layer in layers.iter().flatten() {
+            bitrates.push(layer.rtp_reader.bitrate().await);
         }
         bitrates
     }
@@ -536,8 +635,9 @@ impl Receiver for WebRTCReceiver {
     async fn get_available_layer(&self, best_quality_first: bool) -> usize {
         let mut layer = 0;
         if self.is_simulcast {
-            for (idx, v) in self.available.lock().await.iter().enumerate() {
-                if v.load(Ordering::Relaxed) {
+            let layers = self.layers.read().await;
+            for (idx, layer_opt) in layers.iter().enumerate() {
+                if layer_opt.is_some() {
                     layer = idx;
                     if !best_quality_first {
                         return layer;
@@ -551,35 +651,26 @@ impl Receiver for WebRTCReceiver {
 
     async fn get_max_temporal_layers(&self) -> Vec<i32> {
         let mut temporal_layers = Vec::new();
+        let layers = self.layers.read().await;
 
-        for (idx, a) in self.available.lock().await.iter().enumerate() {
-            if a.load(Ordering::Relaxed) {
-                if let Some(buff) = &self.buffers.lock().await[idx] {
-                    temporal_layers.push(buff.max_temporal_layer().await)
-                }
-            }
+        for layer in layers.iter().flatten() {
+            temporal_layers.push(layer.rtp_reader.max_temporal_layer().await);
         }
         temporal_layers
     }
 
     /// Removes the downtrack with matching `id` on given `layer`.
     /// The downtrack is closed, but the internal track may still be open
-    async fn delete_down_track(&self, layer: usize, id: String) -> Result<()> {
+    async fn delete_down_track(&self, layer: usize, id: &str) -> Result<()> {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::ReceiverClosed);
         }
 
-        let mut down_tracks = self.down_tracks[layer].lock().await;
-        let mut idx: usize = 0;
-        for dt in &*down_tracks {
-            if dt.id() == id {
-                dt.close().await;
-                break;
-            }
-            idx += 1;
-        }
-
-        down_tracks.swap_remove(idx);
+        let Some(layer_data) = self.layer(layer).await else {
+            return Err(Error::FullSpatialLayer(layer as u8));
+        };
+        
+        layer_data.remove_down_track(id, true).await;
         Ok(())
     }
 
@@ -603,8 +694,8 @@ impl Receiver for WebRTCReceiver {
     async fn get_sender_report_time(&self, layer: usize) -> (u32, u64) {
         let mut rtp_ts = 0;
         let mut ntp_ts = 0;
-        if let Some(buffer) = &self.buffers.lock().await[layer] {
-            (rtp_ts, ntp_ts, _) = buffer.get_sender_report_data().await;
+        if let Some(layer_data) = self.layer(layer).await.as_ref() {
+            (rtp_ts, ntp_ts, _) = layer_data.rtp_reader.get_sender_report_data().await;
         }
         (rtp_ts, ntp_ts)
     }
@@ -615,10 +706,14 @@ impl Receiver for WebRTCReceiver {
         packets: &[PacketMeta],
     ) -> Result<()> {
         for packet in packets {
-            if let Some(buffer) = &self.buffers.lock().await[packet.layer as usize] {
+            if let Some(layer) = &self.layer(packet.layer as usize).await {
                 let mut data = vec![0_u8; u16::MAX.into()];
 
-                if let Ok(size) = buffer.get_packet(&mut data[..], packet.source_seq_no).await {
+                if let Ok(size) = layer
+                    .rtp_reader
+                    .get_packet(&mut data[..], packet.source_seq_no)
+                    .await
+                {
                     let mut raw_pkt = Bytes::copy_from_slice(&data[..size]);
                     let pkt = RTCPacket::unmarshal(&mut raw_pkt);
                     match pkt {
@@ -661,7 +756,10 @@ impl Receiver for WebRTCReceiver {
                     }
                 }
             } else {
-                warn!("No buffer found for layer {}. Retransmition skipped.", packet.layer);
+                warn!(
+                    "No buffer found for layer {}. Retransmition skipped.",
+                    packet.layer
+                );
                 break;
             }
         }
@@ -672,141 +770,134 @@ impl Receiver for WebRTCReceiver {
         self
     }
 
-    async fn write_rtp(&self, layer: usize) -> Result<()> {
-        info!("[Receiver {}] Write ExtPacket for layer {layer} started.", self.track_id);
-        let mut interval = tokio::time::interval(Duration::from_micros(125));
-        loop {
-            if let Some(buffer) = &self.buffers.lock().await[layer] {
-                interval.tick().await;
-                let mut close = buffer.close_rx.lock().await;
-                let mut packet_read = buffer.packet_rx.lock().await;
-                tokio::select! {
-                    read = packet_read.recv() => {
-                        match read {
-                            Some(pkt) => {
-                                //trace!("RTP packet received (arrival {})", pkt.arrival.as_secs_f64());
-                                if self.is_simulcast && self.pending[layer].load(Ordering::Relaxed) {
-                                    //trace!("Reading packet on layer {layer} in simulcast receiver");
-                                    if pkt.key_frame {
-                                        //use tmp_val here just to skip the build error
-                                        let mut pending_tracks = Vec::new();
-                                        for dt in &*self.pending_tracks[layer].lock().await {
-                                            pending_tracks.push((
-                                                dt.current_spatial_layer() as usize,
-                                                dt.id().clone(),
-                                                dt.clone(),
-                                            ));
-                                        }
-                                        for (dt_layer, id, dt) in pending_tracks {
-                                            // Delete downtrack from its layer
-                                            if let Err(err) = self.delete_down_track(dt_layer, id).await {
-                                                error!("[Receiver {}] Failed to delete down track: {}", self.peer_id, err);
-                                            };
-                                            // Store downtrack in current layer
-                                            self.store_down_track(layer, dt.clone()).await;
-                                            dt.switch_spatial_layer_forced(layer as u8);
-                                        }
-                                        // Cleanup
-                                        self.pending_tracks[layer].lock().await.clear();
-                                        self.pending[layer].store(false, Ordering::Relaxed);
-                                    } else {
-                                        if !self.is_recent_pli() {
-                                            let sender_ssrc = rand::random::<u32>();
-                                            let media_ssrc = self.ssrc(layer).await;
-                                            
-                                            
-                                            debug!(
-                                                "Send PLI, sender ssrc {sender_ssrc}, media_ssrc {media_ssrc}"
-                                            );
-                                            self.send_rtcp(vec![Box::new(PictureLossIndication {
-                                                sender_ssrc,
-                                                media_ssrc,
-                                            })])
-                                            .await?;
-                                        }
-                                    }
-                                }
-            
-                                let mut delete_down_track_params = Vec::new();
-                                {
-                                    let dts = self.down_tracks[layer].lock().await;
-                                    
-                                    for dt in &*dts {
-                                        if let Err(Error::ErrWebRTC(e)) = dt.forward_rtp(&pkt, layer).await
-                                        {
-                                            match e {
-                                                RTCError::ErrClosedPipe
-                                                | RTCError::ErrDataChannelNotOpen
-                                                | RTCError::ErrConnectionClosed => {
-                                                    error!(
-                                                            "down track write error {}, layer {}, queued for remove",
-                                                            e,
-                                                            layer
-                                                        );
-                                                    delete_down_track_params.push((layer, dt.id().clone()));
-                                                }
-                                                _ => {
-                                                    error!(
-                                                        "down track unknown write error {}, layer {}",
-                                                        e, layer
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-            
-                                // Delete downtracks which received error at sending RTP
-                                for (layer, id) in delete_down_track_params {
-                                    if let Err(err) = self.delete_down_track(layer, id).await {
-                                        error!("[Receiver {}] Failed to delete down track: {}", self.peer_id, err);
-                                    };
-                                }
-                            }
-                            _ => {
-                                warn!("[Receiver {}] Extended packet receiver closed.", self.peer_id);
-                            },
-                        }
-                    }
+    async fn forward_rtp_packet(&self, layer: usize) -> Result<()> {
+        if let Some(receiver_layer) = self.layer(layer).await {
+            let mut close = receiver_layer.rtp_reader.subscribe_to_close();
+            let mut packet_reader = receiver_layer.rtp_reader.subscribe_to_packet();
 
-                    _ = close.recv() => {
-                        if self.is_simulcast && self.pending[layer].load(Ordering::Relaxed) {
-                            for dt in &*self.pending_tracks[layer].lock().await {
-                                info!("Closing track {}", dt.id());
-                                dt.close().await;
+            tokio::select! {
+                read = packet_reader.recv() => {
+                    match read {
+                        Ok(pkt) => {
+                            trace!("RTP packet received (arrival {})", pkt.arrival.as_secs_f64());
+                            if pkt.key_frame {
+                                self.dispose_tracks(receiver_layer.clone()).await;
                             }
-                             // Cleanup
-                             info!("Clear pending tracks from layer #{}", layer);
-                             self.pending_tracks[layer].lock().await.clear();
-                             self.pending[layer].store(false, Ordering::Relaxed);
-                        } else {
-                            let mut dts = self.down_tracks[layer].lock().await;
-                            for dt in &*dts {
-                                info!("Closing track {}", dt.id());
-                                dt.close().await;
+
+                            for dt in receiver_layer.down_tracks.lock().await.deref() {
+                                if let Err(err) = dt.forward_rtp(&pkt, layer).await {
+                                    warn!("Send RTP to down track {} [#{layer}] failed: {err}", dt.id());
+                                };
                             }
-                            info!("Clear tracks from layer #{}", layer);
-                            dts.clear();
                         }
-                    }
+                        Err(RecvError::Lagged(_)) => {
+                            let sender_ssrc = rand::random::<u32>();
+                            let media_ssrc = self.ssrc(layer).await;
+                            self.send_pli(sender_ssrc, media_ssrc).await;
+                        },
+                        _ => {
+                            warn!("[Receiver {}] Extended packet receiver closed.", self.peer_id);
+                            return Err(Error::ErrChannelSend);
+                        },
+                    };
+                }
+
+                _ = close.recv() => {
+                    /*
+                    if self.is_simulcast && self.pending[layer].load(Ordering::Relaxed) {
+                        for dt in &*self.pending_tracks[layer].lock().await {
+                            info!("Closing track {}", dt.id());
+                            dt.close().await;
+                        }
+                         // Cleanup
+                         info!("Clear pending tracks from layer #{}", layer);
+                         self.pending_tracks[layer].lock().await.clear();
+                         self.pending[layer].store(false, Ordering::Relaxed);
+                    } else {
+                        let mut dts = self.down_tracks[layer].lock().await;
+                        for dt in &*dts {
+                            info!("Closing track {}", dt.id());
+                            dt.close().await;
+                        }
+                        info!("Clear tracks from layer #{}", layer);
+                        dts.clear();
+                    }*/
                 }
             }
         }
+        Ok(())
     }
 }
 
 impl WebRTCReceiver {
-    
+    async fn dispose_tracks(&self, layer: Arc<ReceiverLayer>) {
+        let spatial_layer = layer.spatial.load(Ordering::Acquire);
+        trace!(
+            "[Receiver {}] Key frame in layer {}",
+            self.peer_id, spatial_layer
+        );
+        let disposed_tracks = {
+            let mut guard = layer.disposed_tracks.lock().await;
+            std::mem::take(&mut *guard)
+        };
+
+        if disposed_tracks.is_empty() {
+            return;
+        }
+
+        // Procesar cada track: borrar de capa anterior, agregar a esta, forzar switch
+        for dt in disposed_tracks {
+            let current_layer = dt.current_spatial_layer();
+            let id = dt.id();
+
+            // Borrar de capa anterior (si es diferente)
+            if current_layer != spatial_layer {
+                layer.remove_down_track(&id, true).await;
+            }
+
+            // Agregar a capa actual
+            if let Err(err) = self
+                .store_down_track(spatial_layer as usize, dt.clone())
+                .await
+            {
+                error!(
+                    "[Receiver {}] Failed to store down track {}: {}",
+                    self.peer_id, id, err
+                );
+            }
+
+            // Forzar que el track ahora emite desde esta capa
+            dt.switch_spatial_layer_forced(spatial_layer);
+        }
+    }
+
+    pub async fn send_pli(&self, sender_ssrc: u32, media_ssrc: u32) {
+        if !self.is_recent_pli(Duration::from_millis(500)).await {
+            debug!("Send back PLI, sender ssrc {sender_ssrc}, media_ssrc {media_ssrc}");
+            let pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> =
+                vec![Box::new(PictureLossIndication {
+                    sender_ssrc,
+                    media_ssrc,
+                })];
+            if let Err(err) = self.send_rtcp(pkts).await {
+                warn!("Send PLI failed: {err}");
+            }
+        }
+    }
+
     /// Closes all the not available tracks of the receiver, and set the receiver to closed state.
     /// Calls the on_close handler if it is set.
     pub async fn close_tracks(&self) {
-        for dt in self.down_tracks.iter() {
-            let down_tracks = dt.lock().await;
-            if down_tracks.is_empty() {
+        for layer_opt in self.layers.read().await.as_ref() {
+            let Some(down_tracks) = layer_opt.as_ref().map(|l| &l.down_tracks) else {
+                continue;
+            };
+            let guard = down_tracks.lock().await;
+            if guard.is_empty() {
                 continue;
             }
-            
-            for dt in &*down_tracks {
+
+            for dt in guard.deref() {
                 dt.close().await;
             }
         }
@@ -817,14 +908,27 @@ impl WebRTCReceiver {
             close_handler().await;
         }
     }
-    
+
     async fn down_track_subscribed(&self, layer: usize, dt: Arc<DownTrack>) -> bool {
-        let down_tracks = self.down_tracks[layer].lock().await;
-        down_tracks.iter().any(|down_track| *down_track == dt)
+        if let Some(layer) = self.layer(layer).await {
+            let down_tracks = layer.down_tracks.lock().await;
+            return down_tracks
+                .deref()
+                .iter()
+                .any(|down_track| *down_track == dt);
+        }
+        true
     }
 
-    async fn store_down_track(&self, layer: usize, dt: Arc<DownTrack>) {
+    async fn store_down_track(&self, layer: usize, dt: Arc<DownTrack>) -> Result<usize> {
         info!("store_down_track , layer: {}", layer);
-        self.down_tracks[layer].lock().await.push(dt);
+        match self.layer(layer).await {
+            Some(layer) => {
+                let mut down_tracks = layer.down_tracks.lock().await;
+                down_tracks.push(dt);
+                Ok(down_tracks.len())
+            }
+            None => Err(Error::ReceiverLayerNotAvailable(layer)),
+        }
     }
 }

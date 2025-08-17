@@ -7,7 +7,6 @@ use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
-use webrtc::error::Error as RTCError;
 use webrtc::error::Result as RTCResult;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtcp::source_description::SourceDescriptionChunk;
@@ -472,46 +471,45 @@ impl DownTrack {
         self.down_track_local.ssrc.load(Ordering::Acquire)
     }
 
-    /// Atomically switches the spatial layer of the track.
+    /// Atomically sets the spatial layer of the track.
     /// # Arguments
     /// - `target_layer`: Target spatial layer.
     /// - `set_as_max`: If true, sets the target layer as the maximum spatial layer.
     /// # Errors
-    /// - `Error::FullSpatialLayer` if the target layer is currently full.
-    /// - `Error::ErrWebRTC` if the error is from webrtc.
-    pub async fn switch_spatial_layer(
+    /// - `Error::ReceiverLayerNotAvailable(target)` if the target layer is higher than max.
+    pub async fn set_target_spatial_layer(
         self: &Arc<Self>,
         target_layer: u8,
         set_as_max: bool,
     ) -> Result<()> {
         match *self.track_type.lock().await {
             DownTrackType::SimulcastDownTrack => {
-                let csl = self.current_spatial_layer.load(Ordering::Acquire);
-                if csl != self.target_spatial_layer.load(Ordering::Acquire) || csl == target_layer {
-                    return Err(Error::FullSpatialLayer(target_layer));
-                }
-
-                if let Some(receiver) = &self.down_track_local.receiver.upgrade() {
-                    match receiver
-                    .switch_down_track(self.clone(), target_layer as usize)
-                    .await
-                {
-                    Ok(_) => {
-                        self.target_spatial_layer
-                            .store(target_layer, Ordering::Release);
-                        if set_as_max {
-                            self.max_spatial_layer
-                                .store(target_layer, Ordering::Release);
-                        }
-                        debug!(
-                            "[Track {}] Switch to spatial layer: {target_layer} (max={set_as_max})",
-                            self.id()
+                let current = self.current_spatial_layer.load(Ordering::Acquire);
+                // Case 1: current is the target
+                if current == target_layer {
+                    if set_as_max {
+                        let _ = self.max_spatial_layer.fetch_update(
+                            Ordering::SeqCst, 
+                            Ordering::SeqCst,
+                            |current_max| Some(current_max.max(target_layer))
                         );
                     }
-                    Err(err) => return Err(err),
+                    return Ok(());
                 }
                 
+                // Validation
+                let max = self.max_spatial_layer.load(Ordering::Acquire);
+                if max < target_layer {
+                    if set_as_max {
+                        self.set_max_spatial_layer(target_layer);
+                    } else {
+                        // Target should not be higher than max
+                        return Err(Error::ReceiverLayerNotAvailable(target_layer as usize));
+                    }
                 }
+
+                // Update
+                self.target_spatial_layer.store(target_layer, Ordering::Release);
                 return Ok(());
             }
             _ => {
@@ -519,9 +517,7 @@ impl DownTrack {
             }
         }
 
-        Err(Error::ErrWebRTC(RTCError::new(
-            "Spatial layer is not supported for this track.".to_string(),
-        )))
+        Err(Error::ErrInvalidTrack)
     }
 
     /// Atomically switches the spatial layer of the track.
@@ -628,16 +624,8 @@ impl DownTrack {
                 RTPCodecType::Video => {
                     if !ext_packet.key_frame {
                         if let Some(receiver) =  &self.down_track_local.receiver.upgrade() {
-                            if !receiver.is_recent_pli() {
-                                let media_ssrc = ext_packet.packet.header.ssrc;
-                                debug!("send PLI, ssrc:{}, media_ssrc:{}", ssrc, media_ssrc);
-                                receiver
-                                    .send_rtcp(vec![Box::new(PictureLossIndication {
-                                        sender_ssrc: ssrc,
-                                        media_ssrc,
-                                    })])
-                                    .await?;
-                            }
+                            let media_ssrc = ext_packet.packet.header.ssrc;
+                            receiver.send_pli(ssrc, media_ssrc).await;
                         }
                         return Ok(());
                     }
