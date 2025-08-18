@@ -74,14 +74,14 @@ pub struct DownTrackInternal {
     sequencer: Arc<RwLock<AtomicSequencer>>,
     buffer_factory: AtomicFactory,
     /// Whether the track is enabled (unmuted).
-    pub enabled: Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
     /// Whether the track is re-synced.
-    pub re_sync: Arc<AtomicBool>,
+    re_sync: Arc<AtomicBool>,
     last_ssrc: Arc<AtomicU32>,
     /// Codec capability of the track.
-    pub codec: RTCRtpCodecCapability,
+    codec: RTCRtpCodecCapability,
     /// Receiver of the track.
-    pub receiver: Weak<WebRTCReceiver>,
+    receiver: Weak<WebRTCReceiver>,
     write_stream: RwLock<Option<Arc<dyn TrackLocalWriter + Send + Sync>>>,
     on_bind_handler: Arc<RwLock<Option<OnBindFn>>>,
 }
@@ -176,10 +176,6 @@ impl TrackLocal for DownTrackInternal {
             *sequencer = AtomicSequencer::new(self.max_track);
         }
 
-        let handler = self.on_bind_handler.read().await;
-        if let Some(f) = handler.as_ref() {
-            f().await;
-        }
         self.bound.store(true, Ordering::Relaxed);
         Ok(codec)
     }
@@ -351,6 +347,10 @@ impl DownTrack {
         self.down_track_local.id.clone()
     }
 
+    pub fn kind(&self) -> RTPCodecType {
+        self.down_track_local.kind()
+    }
+
     /// Mime type of the track.
     pub async fn mime(&self) -> String {
         self.down_track_local.mime.read().await.clone()
@@ -408,12 +408,12 @@ impl DownTrack {
 
     /// Registers a function to be called when the track is bound.
     /// Alias for [DownTrackInternal::on_bind].
-    pub async fn register_on_bind(&self, f: OnBindFn) {
+    pub async fn on_bind(&self, f: OnBindFn) {
         self.down_track_local.on_bind(f).await
     }
 
     /// Registers a function to be called when [Self::close] is called.
-    pub async fn register_on_close(&self, f: OnCloseFn) {
+    pub async fn on_close(&self, f: OnCloseFn) {
         let mut h = self.on_close_handler.lock().await;
         *h = Some(f);
     }
@@ -518,6 +518,10 @@ impl DownTrack {
         }
 
         Err(Error::ErrInvalidTrack)
+    }
+
+    pub fn stream_id(&self) -> String {
+        self.down_track_local.stream_id.clone()
     }
 
     /// Atomically switches the spatial layer of the track.
@@ -876,38 +880,5 @@ impl Debug for DownTrack {
             .field("max_spatial_layer", &self.max_spatial_layer)
             .field("max_temporal_layer", &self.max_temporal_layer)
             .finish()
-    }
-}
-
-#[async_trait]
-impl TrackLocal for DownTrack {
-    async fn bind(&self, t: &TrackLocalContext) -> RTCResult<RTCRtpCodecParameters> {
-        info!("[Track {}] Track bind", self.id());
-        self.down_track_local.bind(t).await
-    }
-
-    async fn unbind(&self, t: &TrackLocalContext) -> RTCResult<()> {
-        info!("[Track {}] Track bind", self.id());
-        self.down_track_local.unbind(t).await
-    }
-
-    fn id(&self) -> &str {
-        self.down_track_local.id()
-    }
-
-    fn rid(&self) -> Option<&str> {
-        self.down_track_local.rid()
-    }
-
-    fn stream_id(&self) -> &str {
-        self.down_track_local.stream_id()
-    }
-
-    fn kind(&self) -> RTPCodecType {
-        self.down_track_local.kind()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

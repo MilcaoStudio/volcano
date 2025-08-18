@@ -17,7 +17,6 @@ use webrtc::rtcp::source_description::SourceDescription;
 use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability};
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-use webrtc::track::track_local::TrackLocal;
 use webrtc::{data_channel::RTCDataChannel,
     ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::RTCPeerConnection,
 };
@@ -370,7 +369,7 @@ impl Subscriber {
 
         // 2. Remove from stream mapping
         let should_remove_stream = {
-            let mut guard = self.stream_tracks.get_mut(stream_id);
+            let mut guard = self.stream_tracks.get_mut(&stream_id);
             if let Some(track_ids) = guard.as_mut() {
                 // Remove by index (more efficient than retain)
                 if let Some(pos) = track_ids.iter().position(|id| id == &track_id) {
@@ -383,7 +382,7 @@ impl Subscriber {
         };
 
         if should_remove_stream {
-            self.stream_tracks.remove(stream_id);
+            self.stream_tracks.remove(&stream_id);
         }
     }
 
