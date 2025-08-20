@@ -72,7 +72,6 @@ impl PubSubController {
 
     pub async fn join(&self, room: Arc<Room>, cfg: &PeerConfig) -> Result<()> {
         let id = &self.id;
-        info!("[{id}] Join to {} requested", room.id);
 
         let weak_room = Arc::downgrade(&room);
         let mut peer_config = (*self.config).clone();
@@ -141,9 +140,7 @@ impl PubSubController {
 
             *self.publisher.lock().await = Some(publisher);
         }
-
-        //room.add_peer(self.clone()).await;
-        info!("[Peer {}] Adds to room {}", id, room.id);
+        
         room.add_user(id.to_owned());
 
         Ok(())
@@ -234,13 +231,14 @@ impl PubSubController {
 impl PeerController for PubSubController {
     async fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
-
         if let Some(s) = self.subscriber.lock().await.take() {
             s.close().await;
+            info!("Subscriber {} closed.", s.id());
         }
 
         if let Some(p) = self.publisher.lock().await.take() {
             p.close().await;
+            info!("Publisher {} closed", p.id());
         }
     }
 
