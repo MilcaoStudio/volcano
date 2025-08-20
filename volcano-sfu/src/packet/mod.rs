@@ -10,7 +10,6 @@ use error::Result;
 
 use bucket::Bucket;
 use nack::NackQueue;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 use webrtc::rtp::extension::transport_cc_extension::TransportCcExtension;
 
@@ -444,14 +443,13 @@ pub struct AtomicBuffer {
     audio_level: AtomicBool,
     bound: AtomicBool,
     buffer: Arc<Mutex<Buffer>>,
-    close_sender: broadcast::Sender<()>,
-    pub close_rx: Arc<Mutex<broadcast::Receiver<()>>>,
+    close_tx: broadcast::Sender<()>,
+    forwarding: AtomicBool,
     on_transport_wide_cc_handler: Arc<Mutex<Option<OnTransportWideCCFn>>>,
     on_feedback_callback_handler: Arc<Mutex<Option<OnFeedbackCallBackFn>>>,
     on_audio_level: Arc<Mutex<Option<OnAudioLevelFn>>>,
     pending_packets: Mutex<Vec<PendingPackets>>,
-    packet_tx: UnboundedSender<ExtPacket>,
-    pub packet_rx: Arc<Mutex<UnboundedReceiver<ExtPacket>>>,
+    packet_tx: broadcast::Sender<ExtPacket>,
     twcc: AtomicBool,
     twcc_ext: AtomicU8,
     pub start_time: Instant,
@@ -475,10 +473,12 @@ impl BufferIO for AtomicBuffer {
         let arrival_time = arrival_instant.duration_since(self.start_time);
         {
             let mut buffer = self.buffer.lock().await;
-            let ext_packet = buffer.process_rtp_packet(pkt.clone(), arrival_instant, arrival_time);
-            if let Err(err) = self.packet_tx.send(ext_packet) {
-                warn!("write -> Send packet failed: {err}");
-            };
+            if self.forwarding.load(Ordering::Acquire) {
+                let ext_packet = buffer.process_rtp_packet(pkt.clone(), arrival_instant, arrival_time);
+                if let Err(err) = self.packet_tx.send(ext_packet) {
+                    warn!("write -> Send packet failed: {err}");
+                };
+            }
 
             if buffer.nacker.is_some() {
                 let fb_packets = buffer.build_feedback_packets();
@@ -541,7 +541,8 @@ impl BufferIO for AtomicBuffer {
     async fn close(&self) -> Result<()> {
         //let buffer = self.buffer.lock().await;
         //if buffer.bucket.is_some() && buffer.codec_type == RTPCodecType::Video {}
-        if let Err(_) = self.close_sender.send(()) {
+        self.forwarding.store(false, Ordering::Release);
+        if let Err(_) = self.close_tx.send(()) {
             warn!("close_rx dropped");
         };
 
@@ -551,19 +552,21 @@ impl BufferIO for AtomicBuffer {
 
 impl AtomicBuffer {
     pub fn new(ssrc: u32) -> Self {
-        let (s, r) = broadcast::channel::<()>(1);
-        let (pkt_s, pkt_r) = unbounded_channel::<ExtPacket>();
+        let (close_tx, _) = broadcast::channel::<()>(1);
+        let (packet_tx, _) = broadcast::channel::<ExtPacket>(30);
+        //let (pkt_s, pkt_r) = unbounded_channel::<ExtPacket>();
         Self {
             audio_ext: Default::default(),
             audio_level: Default::default(),
             bound: Default::default(),
             buffer: Arc::new(Mutex::new(Buffer::new(ssrc))),
             pending_packets: Default::default(),
-            close_sender: s,
-            close_rx: Arc::new(Mutex::new(r)),
+            close_tx,
+            forwarding: Default::default(),
+            //close_rx: Arc::new(Mutex::new(r)),
             start_time: Instant::now(),
-            packet_tx: pkt_s,
-            packet_rx: Arc::new(Mutex::new(pkt_r)),
+            packet_tx,
+            //packet_rx: Arc::new(Mutex::new(pkt_r)),
             on_audio_level: Default::default(),
             on_feedback_callback_handler: Default::default(),
             on_transport_wide_cc_handler: Default::default(),
@@ -572,7 +575,7 @@ impl AtomicBuffer {
         }
     }
 
-    pub async fn bind(&self, params: RTCRtpParameters, o: Options) {
+    pub async fn bind(&self, params: &RTCRtpParameters, o: Options) {
         let mut buffer = self.buffer.lock().await;
         let codec = &params.codecs[0];
         buffer.clock_rate = codec.capability.clock_rate;
@@ -692,6 +695,19 @@ impl AtomicBuffer {
         buffer.last_srrtp_time = rtp_time;
         buffer.last_srntp_time = ntp_time;
         buffer.last_sr_recv = Instant::now().elapsed().subsec_nanos() as i64;
+    }
+
+    pub fn subscribe_to_close(&self) -> broadcast::Receiver<()> {
+        self.close_tx.subscribe()
+    }
+
+    pub fn subscribe_to_packet(&self) -> broadcast::Receiver<ExtPacket> {
+        self.forwarding.store(true, Ordering::Release);
+        self.packet_tx.subscribe()
+    }
+
+    pub fn bound(&self) -> bool {
+        self.bound.load(Ordering::Acquire)
     }
 }
 

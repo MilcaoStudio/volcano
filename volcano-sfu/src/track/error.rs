@@ -8,6 +8,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum Error {
+    /*
     // ErrTransportExists join is called after a peerconnection is established
     #[error("rtc transport already exists for this connection")]
     ErrTransportExists,
@@ -20,18 +21,22 @@ pub enum Error {
     // ErrTurnNoneAuthKey
     #[error("cannot get auth key from user map")]
     ErrTurnNoneAuthKey,
+    */
+    #[error("track is not valid to apply this operation")]
+    ErrInvalidTrackOperation,
     #[error("received track is not valid")]
     ErrInvalidTrack,
     #[error("webrtc error {0}")]
     ErrWebRTC(RTCError),
     #[error("rtcp error {0}")]
     ErrRTCP(RTCPError),
+    /*
     #[error("no subscriber for this peer")]
     ErrNoSubscriber,
     #[error("data channel doesn't exist")]
     ErrDataChannelNotExists,
     #[error("no receiver found")]
-    ErrNoReceiverFound,
+    ErrNoReceiverFound,*/
     #[error("channel send error")]
     ErrChannelSend,
     #[error("receiver layer #{0} is not available")]

@@ -172,6 +172,17 @@ impl Subscriber {
     }
 
     pub async fn close(&self) {
+        debug!("[Subscriber {}] Closing {} tracks", self.id, self.tracks.len());
+        for dt in self.tracks.iter() {
+            // Calls on_close in every downtrack
+            debug!("[Subscriber {}] Close track {}", self.id, dt.id());
+            dt.close().await;
+        }
+
+        // Clean up tracks map
+        self.tracks.clear();
+        self.stream_tracks.clear();
+
         if let Err(err) = self.pc.close().await {
             error!("subscriber peer close error: {err}");
         };
@@ -352,14 +363,12 @@ impl Subscriber {
         *handler = Some(offer_fn);
     }
 
-    pub fn remove_down_track(&self, down_track: &Arc<DownTrack>) {
-        let track_id = down_track.id().to_string();
-        let stream_id = down_track.stream_id();
+    pub fn remove_down_track(&self, track_id: &str, stream_id: &str) {
 
         // 1. Remove from tracks
-        let removed = self.tracks.remove(&track_id).is_some();
+        let removed = self.tracks.remove(track_id).is_some();
         if !removed {
-            return; // Track doesn't exist
+            return;
         }
 
         info!(
@@ -369,10 +378,10 @@ impl Subscriber {
 
         // 2. Remove from stream mapping
         let should_remove_stream = {
-            let mut guard = self.stream_tracks.get_mut(&stream_id);
+            let mut guard = self.stream_tracks.get_mut(stream_id);
             if let Some(track_ids) = guard.as_mut() {
                 // Remove by index (more efficient than retain)
-                if let Some(pos) = track_ids.iter().position(|id| id == &track_id) {
+                if let Some(pos) = track_ids.iter().position(|id| id == track_id) {
                     track_ids.swap_remove(pos);
                 }
                 track_ids.is_empty()
@@ -382,7 +391,7 @@ impl Subscriber {
         };
 
         if should_remove_stream {
-            self.stream_tracks.remove(&stream_id);
+            self.stream_tracks.remove(stream_id);
         }
     }
 
@@ -462,7 +471,7 @@ impl Subscriber {
 
 #[async_trait]
 impl Consumer for Subscriber {
-    fn add_down_track(&self, down_track: Arc<DownTrack>) -> super::Result<()> {
+    fn add_down_track(&self, down_track: Arc<DownTrack>) {
         let stream_id = down_track.stream_id().to_owned();
         let dt_id = down_track.id();
 
@@ -477,8 +486,6 @@ impl Consumer for Subscriber {
             .entry(stream_id)
             .or_insert_with(Vec::new)
             .push(dt_id);
-
-        Ok(())
     }
 
     fn down_track_by_id(&self, id: &str) -> Option<Arc<DownTrack>> {
@@ -526,18 +533,19 @@ impl Consumer for Subscriber {
             Some(dt) => dt,
             None => return Ok(()), // Track already removed
         };
+        let stream_id = down_track.stream_id();
 
         let sender = match &down_track.transceiver {
             Some(t) => t.sender().await,
             None => {
                 warn!("DownTrack {} has no transceiver", track_id);
-                self.remove_down_track(&down_track);
+                self.remove_down_track(track_id, &stream_id);
                 return Ok(());
             }
         };
 
         info!("[Subscriber {}] Remove DownTrack {}", self.id, down_track.id());
-        self.remove_down_track(&down_track);
+        self.remove_down_track(track_id, &stream_id);
         drop(down_track); // Drop local track
         
         // Remove track sender from subscriber peer connection

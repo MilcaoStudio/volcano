@@ -21,7 +21,6 @@ use webrtc::{
         RTCRtpTransceiverInit, rtp_codec::RTCRtpCodecCapability,
         rtp_transceiver_direction::RTCRtpTransceiverDirection,
     },
-    track::track_local::TrackLocal,
 };
 
 use crate::{
@@ -156,8 +155,9 @@ impl CentralController {
         let peer_1 = self.clone();
         let down_track_1 = down_track_arc.clone();
         let receiver_1 = receiver.clone();
+        let layer = receiver.get_available_layer(self.config.router.simulcast.best_quality_first).await;
         down_track_arc
-            .register_on_close(Box::new(move || {
+            .on_close(Box::new(move || {
                 let dt_in = down_track_1.clone();
                 let receiver_in = receiver_1.clone();
                 let peer_in = peer_1.clone();
@@ -184,7 +184,7 @@ impl CentralController {
         let peer_2 = self.clone();
         let stream_id = receiver.stream_id();
         down_track_arc
-            .register_on_bind(Box::new(move || {
+            .on_bind(Box::new(move || {
                 let peer_in = peer_2.clone();
                 let s_id = stream_id.clone();
                 Box::pin(async move {
@@ -207,7 +207,7 @@ impl CentralController {
         match receiver
             .add_down_track(
                 down_track_arc.clone(),
-                self.config.router.simulcast.best_quality_first,
+                layer,
             )
             .await
         {
@@ -353,7 +353,7 @@ impl CentralController {
             let router_in = router.clone();
             let peer_in = peer_1.clone();
             Box::pin(async move {
-                let (r, _) = router_in.add_receiver(receiver, track.clone()).await;
+                let (r, _) = router_in.add_uptrack(receiver, track.clone()).await;
                 if let Err(err) = peer_in.add_down_track(r).await {
                     error!(
                         "[Peer {}] on_track Add down track failed: {}",
@@ -709,9 +709,8 @@ impl CentralConsumer {
 
 #[async_trait]
 impl Consumer for CentralConsumer {
-    fn add_down_track(&self, down_track: Arc<DownTrack>) -> PeerResult<()> {
+    fn add_down_track(&self, down_track: Arc<DownTrack>) {
         self.tracks.insert(down_track.id(), down_track);
-        Ok(())
     }
 
     fn down_track_by_id(&self, track_id: &str) -> Option<Arc<DownTrack>> {

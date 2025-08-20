@@ -169,14 +169,25 @@ impl LocalRouter {
             }
         };
 
-        let s_out = consumer.clone();
-        let down_track_out = down_track_arc.clone();
+        consumer.add_down_track(down_track_arc.clone());
+
+        let layer = receiver.get_available_layer(self.config.simulcast.best_quality_first).await;
+
+        //let s_out = consumer.clone();
+        let r_out = receiver.clone();
+        //let down_track_out = down_track_arc.clone();
+        let track_id = down_track_arc.id().clone();
         down_track_arc
-            .register_on_close(Box::new(move || {
-                let s_in = s_out.clone();
-                let down_track_in = down_track_out.clone();
+            .on_close(Box::new(move || {
+                let track_id_in = track_id.clone();
+                debug!("[Downtrack {}] Do on_close (layer {layer})", track_id_in);
+                //let s_in = s_out.clone();
+                let receiver_in = r_out.clone();
+                //let down_track_in = down_track_out.clone();
                 Box::pin(async move {
-                    let _ = s_in.unsubscribe_track(&down_track_in.id()).await;
+                    if let Err(err) = receiver_in.delete_down_track(layer, &track_id_in).await {
+                        warn!("delete_down_track failed: {err}");
+                    };
                 })
             }))
             .await;
@@ -194,6 +205,18 @@ impl LocalRouter {
             }))
             .await;
         */
+        
+        // Task: Forward RTP
+        let receiver_1 = receiver.clone();
+        tokio::spawn(async move {
+            info!("[Receiver {}] Looping for layer {layer} started.", receiver_1.track_id());
+            loop {
+                if let Err(err) = receiver_1.forward_rtp_packet(layer).await {
+                    info!("Forward RTP closed: {err}");
+                    break;
+                };
+            }
+        });
 
         info!(
             "[Router {}] Local track {} created",
@@ -206,7 +229,7 @@ impl LocalRouter {
         receiver
             .add_down_track(
                 down_track_arc.clone(),
-                self.config.simulcast.best_quality_first,
+                layer,
             )
             .await
             .map(|_| down_track_arc)
@@ -260,7 +283,7 @@ impl LocalRouter {
     /// Adds a new [Receiver] to this router if it doesn't exist, otherwise, returns the existing receiver.
     ///
     /// # Audio level detection
-    /// If `track`'s kind is [RTPCodecType::Audio], [Self::audio_observer] will observe audio levels of the track.
+    /// If track's kind is [RTPCodecType::Audio], [Self::audio_observer] will observe audio levels of the track.
     ///
     /// # RTP listener
     /// Every RTP packet received by `track` will be forwarded to a buffer.
@@ -273,7 +296,7 @@ impl LocalRouter {
     /// (receiver, published)
     /// - `receiver`: [Receiver] that was created or fetched.
     /// - `published`: Whether the receiver was created or fetched.
-    pub async fn add_receiver(
+    pub async fn add_uptrack(
         &self,
         rtp_receiver: Arc<RTCRtpReceiver>,
         track: Arc<TrackRemote>,
@@ -410,54 +433,28 @@ impl LocalRouter {
                 published = true;
                 info!("Track {} published", track.id());
                 
-                let rtp_rv1 = rtp_receiver.clone();
-                tokio::spawn(async move {
-                    // Use mtu size (1460)
-                    while let Ok((pkts, _)) = rtp_rv1.read_rtcp().await {
-                        rtcp_reader.send_packets(pkts).await;
-                    }
-                });
-
                 if let Some(f) = &mut *self.on_add_receiver_track_handler.lock().await {
                     let _ = f(arc_receiver.clone()).await;
                 }
             }
         }
-        let layer = arc_receiver
+        if let Some(layer) = arc_receiver
             .add_up_track(
                 track.clone(),
                 buffer.clone(),
+                rtcp_reader.clone(),
                 self.config.simulcast.best_quality_first,
             )
-            .await;
-
-        if let Some(layer_val) = layer {
-            let receiver_clone = arc_receiver.clone();
-            tokio::spawn(async move { receiver_clone.write_rtp(layer_val).await });
+            .await
+        {
+            // Bind RTP
+            buffer.bind(&rtp_receiver.get_parameters().await, PacketOptions {
+                max_bitrate: self.config.max_bandwidth
+            }).await;
+            
+            layer.run_ingestion(rtp_receiver);
         }
-
-        buffer
-            .bind(
-                rtp_receiver.get_parameters().await,
-                PacketOptions {
-                    max_bitrate: self.config.max_bandwidth,
-                },
-            )
-            .await;
-        let buffer_clone = buffer.clone();
-
-        info!(
-            "[Publisher {}] Reading RTP packets from {}",
-            self.id,
-            track.id()
-        );
-        tokio::spawn(async move {
-            // Use mtu size (1460)
-            while let Ok((pkt, _)) = track.read_rtp().await {
-                //trace!("Write RTP packet");
-                buffer_clone.write(pkt).await;
-            }
-        });
+        
         (arc_receiver, published)
     }
 

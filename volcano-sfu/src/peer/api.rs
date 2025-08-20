@@ -5,7 +5,7 @@ use webrtc::{
         interceptor_registry::register_default_interceptors,
         media_engine::MediaEngine,
         APIBuilder,
-    }, data_channel::{data_channel_init::RTCDataChannelInit, RTCDataChannel}, error::Result, interceptor::registry::Registry, peer_connection::{configuration::RTCConfiguration, RTCPeerConnection}, rtp_transceiver::rtp_codec::{RTCRtpHeaderExtensionCapability, RTPCodecType}, sdp::extmap, track::track_local::TrackLocal
+    }, data_channel::{data_channel_init::RTCDataChannelInit, RTCDataChannel}, error::Result, interceptor::registry::Registry, peer_connection::{configuration::RTCConfiguration, RTCPeerConnection}, rtp_transceiver::rtp_codec::{RTCRtpHeaderExtensionCapability, RTPCodecType}, sdp::extmap
 };
 
 use crate::{session::config::WebRTCTransportConfig, track::{downtrack::DownTrack, message::RemoteMedia}};
@@ -182,19 +182,19 @@ pub async fn process_remote_media(remote_media: &RemoteMedia, down_tracks: &Vec<
                 match remote_media.video.as_str() {
                     HIGH_VALUE => {
                         dt.mute(false);
-                        if let Err(err) = dt.switch_spatial_layer(2, true).await {
+                        if let Err(err) = dt.set_target_spatial_layer(2, true).await {
                             error!("switch_spatial_layer err: {}", err);
                         }
                     }
                     MEDIA_VALUE => {
                         dt.mute(false);
-                        if let Err(err) = dt.switch_spatial_layer(1, true).await {
+                        if let Err(err) = dt.set_target_spatial_layer(1, true).await {
                             error!("switch_spatial_layer err: {}", err);
                         }
                     }
                     LOW_VALUE => {
                         dt.mute(false);
-                        if let Err(err) = dt.switch_spatial_layer(0, true).await {
+                        if let Err(err) = dt.set_target_spatial_layer(0, true).await {
                             error!("switch_spatial_layer err: {}", err);
                         }
                     }

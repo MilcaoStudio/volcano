@@ -140,6 +140,10 @@ impl Publisher {
         tracks.iter().map(|t| t.track.clone()).collect()
     }
 
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
     pub fn on_ice_candidate(&self, f: OnLocalCandidateHdlrFn) {
         self.pc.on_ice_candidate(f);
     }
@@ -151,30 +155,29 @@ impl Publisher {
 
     async fn on_track(&self) {
         let router_out = Arc::clone(&self.router);
-        //let router_out_2 = Arc::clone(&self.router);
         let room_out = self.room.clone();
-        //let room_out_2 = self.room.clone();
         let tracks_out = Arc::clone(&self.tracks);
-        //let peer_id_out_2 = self.id.clone();
         let user_id_out = self.id.clone();
-        //let pc_out = self.pc.clone();
 
         self.pc.on_track(Box::new(
-            move |track: Arc<TrackRemote>, receiver: Arc<RTCRtpReceiver>, _: Arc<RTCRtpTransceiver>| {
+            move |track: Arc<TrackRemote>, receiver: Arc<RTCRtpReceiver>, transceiver: Arc<RTCRtpTransceiver>| {
+
                 let router_in = Arc::clone(&router_out);
                 let room_in = room_out.clone();
                 let tracks_in = Arc::clone(&tracks_out);
                 let user_id_in = user_id_out.clone();
+                info!("[Publisher {user_id_in}] Transceiver current direction {}", transceiver.current_direction());
 
                 Box::pin(async move {
                     let track_id = track.id();
                     let track_stream_id = track.stream_id();
-                    let track_clone = track.clone();
                     info!("Track {} from stream {} received", track_id, track_stream_id);
+                    
+                    let track_clone = track.clone();
                     let receiver_2 = receiver.clone();
 
                     let (r, publish) = router_in
-                        .add_receiver(receiver, track_clone.clone(),)
+                        .add_uptrack(receiver, track_clone.clone(),)
                         .await;
                     debug!("[Publisher {}] Add track receiver with track {} into router", user_id_in, r.track_id());
                     let receiver_clone = r.clone();

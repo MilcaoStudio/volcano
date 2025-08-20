@@ -13,7 +13,7 @@ pub trait Consumer {
     fn id(&self) -> String;
     
     async fn new_local_track(&self, codec_capability: RTCRtpCodecCapability, receiver: &Arc<WebRTCReceiver>) -> Result<Arc<DownTrack>>;
-    fn add_down_track(&self, down_track: Arc<DownTrack>) -> Result<()>;
+    fn add_down_track(&self, down_track: Arc<DownTrack>);
     fn down_track_by_id(&self, id: &str) -> Option<Arc<DownTrack>>;
     
     async fn unsubscribe_track(&self, track_id: &str) -> Result<()>;
