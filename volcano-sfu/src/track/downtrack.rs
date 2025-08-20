@@ -216,6 +216,8 @@ impl TrackLocal for DownTrackInternal {
 pub struct DownTrack {
     /// Canonical name defined by RFC 3550 6.5.1
     cname: String,
+    /// Close flag
+    closed: AtomicBool,
     //peer_id: String,
     track_type: Mutex<DownTrackType>,
     /// Packet payload stored in buffer.
@@ -277,6 +279,7 @@ impl DownTrack {
     ) -> Self {
         Self {
             cname,
+            closed: Default::default(),
             track_type: Mutex::new(DownTrackType::SimpleDownTrack),
             payload: Vec::new(),
             current_spatial_layer: AtomicU8::default(),
@@ -372,6 +375,7 @@ impl DownTrack {
     pub fn new_track_local(cname: String, track: Arc<DownTrackInternal>) -> Self {
         Self {
             cname,
+            closed: Default::default(),
             track_type: Mutex::new(DownTrackType::SimpleDownTrack),
             payload: Vec::default(),
 
@@ -414,6 +418,10 @@ impl DownTrack {
 
     /// Registers a function to be called when [Self::close] is called.
     pub async fn on_close(&self, f: OnCloseFn) {
+        // Asserts downtrack is closed
+        if self.closed.swap(true, Ordering::Relaxed) {
+            return;
+        }
         let mut h = self.on_close_handler.lock().await;
         *h = Some(f);
     }
