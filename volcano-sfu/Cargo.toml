@@ -1,6 +1,6 @@
 [package]
 name = "volcano-sfu"
-version = "0.4.2"
+version = "0.5.0-rc1"
 edition = "2024"
 authors = ["Ian Parra <ianparra200@gmail.com>"]
 description = "Selective Forwarding Unit (SFU) for WebRTC signaling apps"
@@ -26,7 +26,7 @@ regex = "1.10.4"
 ulid = "1.1.2"
 
 # Error
-thiserror = "1.0.58"
+thiserror = "2"
 
 # Serde
 serde = { version = "1.0.197", features = ["derive"] }
