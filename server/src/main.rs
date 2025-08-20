@@ -1,7 +1,7 @@
 use std::fs;
 
 use clap::Parser;
-use volcano_sfu::rtc::config::Config;
+use volcano_sfu::session::config::Config;
 
 #[macro_use]
 extern crate log;

@@ -1,7 +1,8 @@
 use thiserror::Error;
 use tokio_tungstenite::tungstenite::Message;
 
-use volcano_sfu::rtc::{peer::{PeerConfig, PeerRole}, room::RoomInfo};
+
+use volcano_sfu::{controllers::{pubsub::PeerRole, PeerConfig}, session::room::RoomInfo};
 use webrtc::{
     ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
     peer_connection::sdp::session_description::RTCSessionDescription,

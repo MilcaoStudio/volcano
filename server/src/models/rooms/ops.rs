@@ -1,5 +1,5 @@
 use std::{sync::Arc};
-use volcano_sfu::rtc::{room::Room};
+use volcano_sfu::session::{room::Room};
 
 use crate::reference::ReferenceDb;
 

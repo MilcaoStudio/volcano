@@ -1,11 +1,11 @@
 use anyhow::Result;
 use futures::{Future, StreamExt};
+use volcano_sfu::session::config::{Config, PortMap, WebRTCTransportConfig};
 use std::{pin::Pin, sync::Arc, time::Duration};
 use tokio::{
     net::{TcpListener, TcpStream},
     time::{timeout, Instant},
 };
-use volcano_sfu::rtc::config::{Config, PortMap, WebRTCTransportConfig};
 
 use crate::{
     reference::ReferenceDb,
@@ -112,6 +112,7 @@ async fn accept_connection(
     let write = Sender::new(write);
 
     // Handle any resulting errors
+    
     if let Err(error) = handle_connection((read, write), auth, w, db).await {
         error!("Connection ended with error: {error}");
     }
@@ -147,6 +148,7 @@ async fn handle_connection(
                                     if let Ok(user) = (auth)(token).await {
                                         let user_id = user.id.clone();
 
+                                        
                                         let client = Client::new(user, Arc::clone(&w), db.clone());
 
                                         // Send reply (same id)
@@ -158,7 +160,7 @@ async fn handle_connection(
                                                 available_rooms: Vec::default(),
                                             })
                                             .await?;
-
+                                        
                                         // Start client task
                                         return client.run((read, write)).await;
                                     }

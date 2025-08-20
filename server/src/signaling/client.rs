@@ -1,13 +1,11 @@
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use anyhow::Result;
 use futures::{TryStreamExt};
+use serde::Serialize;
 use tokio::sync::{broadcast::error::RecvError, watch};
-use volcano_sfu::rtc::{
-    config::WebRTCTransportConfig,
-    peer::{PeerConfig, PeerRole, PubSubPeer},
-    room::Room,
-};
+use volcano_sfu::{controllers::{pubsub::{PeerRole, PubSubController}, PeerConfig, PeerController}, session::{config::WebRTCTransportConfig, room::Room}};
 use webrtc::{
     ice_transport::{
         ice_candidate::RTCIceCandidateInit,
@@ -29,7 +27,7 @@ pub struct Client {
     close_events_rx: watch::Receiver<bool>,
     user: UserInformation,
     pub room: Option<Arc<Room>>,
-    pub peer: Arc<PubSubPeer>,
+    pub peer: Arc<PubSubController>,
     db: Arc<ReferenceDb>,
 }
 
@@ -43,12 +41,13 @@ impl Client {
             db,
             user: user.clone(),
             room: None,
-            peer: Arc::new(PubSubPeer::new(user.id.to_owned(), config)),
+            peer: Arc::new(PubSubController::new( user.id.clone(), user.id.to_owned(), config)),
         }
     }
 
     /// Run client lifecycle
     pub async fn run(mut self, stream: ReadWritePair) -> Result<()> {
+        
         // Start working
         let result = self.lifecycle_listen(stream).await;
 
@@ -74,6 +73,7 @@ impl Client {
                 match PacketC2S::from(&msg) {
                     Ok(packet) => {
                         debug!("[Incoming] C->S: {:?}", packet);
+                        
                         let result = self.handle_message(packet, &write).await;
                         match result {
                             Ok(_) => debug!("[Incoming] Done!"),
@@ -130,7 +130,7 @@ impl Client {
         let peer = self.peer.clone();
         match packet {
             PacketC2S::Answer { description } => {
-                if let Err(err) = peer.set_remote_description(description).await {
+                if let Err(err) = peer.on_remote_answer(description).await {
                     error!("[Client {0}] [On Answer] Set remote description failed: {err}", self.user.id);
                     return write.send(LostConnectionError::SubscriberConnectionLost).await;
                 }
@@ -142,6 +142,7 @@ impl Client {
                 offer,
                 cfg,
             } => {
+                
                 // Send "open" without receivers
                 self.close_events_tx.send_replace(false);
                 let room = self.db.fetch_or_create_room(&room_id).await;
@@ -157,7 +158,7 @@ impl Client {
                         // Remove user
                         room.remove_user(&self.user.id).await;
                         if room.is_empty() {
-                            room.close().await;
+                            room.close();
                         }
                         let _ = self.close_events_tx.send(true);
                         Ok(()) // Drop room
@@ -227,13 +228,18 @@ impl Client {
         }))
         .await;
 
+        let peer_id = peer.id();
+        info!("[{}] Joins room {}", peer_id, room.id);
         if let Err(err) = peer.join(room.clone(), cfg).await {
             error!("join error: {}", err);
             return Err(err.into());
         }
+        
+        debug!("Room {} adds peer {}", room.id, peer.id());
+        room.add_peer(peer.clone());
 
         if let Some(offer) = initial_offer {
-            match peer.answer(offer).await {
+            match peer.on_remote_offer(offer).await {
                 Ok(answer) => {
                     // Sends back request id
                     sender
@@ -252,28 +258,23 @@ impl Client {
             };
         }
 
+        
         // Set up subscriber... on join?
         if !cfg.no_subscribe {
             info!("[{}] Set up subscriber", self.user.id);
             peer.setup_subscriber(&cfg).await?;
 
-            if !cfg.no_publish {
-                if let Some(sub) = peer.subscriber().await {
-                    for dc in room.get_data_channel_middlewares().iter() {
-                        sub.add_data_channel(&dc.config.label).await?;
-                    }
-                }
-            }
-
             info!("[Peer {}] Subscribe to room {}", peer.id(), room.id);
             room.subscribe_peer(peer.clone()).await;
         }
 
+        
         // Send room info
         let room_info = room.get_room_info();
         if let Err(err) = sender.send(PacketS2C::RoomInfo { room: room_info }).await {
             error!("send room info error: {}", err);
         };
+        
 
         let mut close_rx = self.close_events_rx.clone();
         tokio::spawn(async move {
@@ -284,7 +285,7 @@ impl Client {
                     result = event_rx.recv() => {
                         match result {
                             Ok(event) => {
-                                room.send_to_subscribers(event).await;
+                                Self::send_to_subscribers(room.clone(), event).await;
                             }
                             Err(RecvError::Lagged(n)) => {
                                 warn!("Room event listener lagged. {n} events.");
@@ -315,11 +316,11 @@ impl Client {
     }
 
     pub(super) async fn handle_offer(
-        peer: Arc<PubSubPeer>,
+        peer: Arc<PubSubController>,
         write: Sender,
         offer: RTCSessionDescription,
     ) -> Result<()> {
-        match peer.answer(offer).await {
+        match peer.on_remote_offer(offer).await {
             Ok(answer) => {
                 write
                     .send(PacketS2C::Answer {
@@ -332,5 +333,36 @@ impl Client {
                 write.send(LostConnectionError::PublisherConnectionLost).await
             }
         }
+    }
+
+    /// Sends a serializable message to all peers' subscribers
+    async fn send_to_subscribers<Message>(room: Arc<Room>, msg: Message)
+    where
+        Message: Serialize + Debug,
+    {
+        if let Ok(payload) = serde_json::to_string(&msg) {
+            for peer_entry in room.peers.iter() {
+                let peer = peer_entry.as_ref();
+                match peer.local_data_channel("System").await {
+                    Some(dc) => {
+                        match dc.send_text(&payload).await {
+                            Ok(_) => {},
+                             Err(webrtc::Error::ErrClosedPipe) => {
+                                match peer.negotiate(None).await {
+                                    Ok(_) => {},
+                                    Err(err) => error!("[Subscriber {}] [send_message] negotiate error: {err}", peer.id()),
+                                }
+                            },
+                            Err(e) =>  error!("[Subscriber {}] Send message error: {e}", peer.id()),
+                        }
+                    },
+                    _ => {
+                        info!("[Peer {}] Data channel not found.", peer.id());
+                    }
+                }
+            }
+        } else {
+            error!("Error parsing {:?}", msg);
+        };
     }
 }

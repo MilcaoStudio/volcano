@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use tokio::sync::Mutex;
-use volcano_sfu::rtc::room::Room;
+use volcano_sfu::session::room::Room;
 
 #[derive(Default)]
 pub struct ReferenceDb {
