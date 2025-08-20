@@ -132,16 +132,16 @@ impl Room {
         })
     }
 
-    pub async fn add_peer(&self, peer: Arc<dyn PeerController>) {
+    pub fn add_peer(&self, peer: Arc<dyn PeerController>) {
         let id = peer.id();
         self.peers.insert(id, peer.into());
     }
 
-    pub async fn close(&self) {
+    pub fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
     }
 
-    pub async fn get_peer(&self, peer_id: &str) -> Option<Arc<dyn PeerController>> {
+    pub fn get_peer(&self, peer_id: &str) -> Option<Arc<dyn PeerController>> {
         self.peers.get(peer_id).map(|peer| (**peer).clone())
     }
 
@@ -163,6 +163,8 @@ impl Room {
         if let Some((_, peer)) = self.peers.remove(peer_id) {
             peer.close().await;
             debug!("peer: {} strong references left", Arc::strong_count(&peer));
+        } else {
+            debug!("Peer {peer_id} not found.");
         }; // Drop peer
 
         self.peers.len()
@@ -257,7 +259,6 @@ impl Room {
     pub async fn subscribe_peer(&self, peer: Arc<PubSubController>) {
         // Removed massive data channel creation
         
-
         if let Ok(router) = peer.router().await {
             router.start_audio_observer_task().await;
         }
