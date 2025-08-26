@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::{Duration, sleep};
+use tokio::time::{interval, sleep, Duration};
 use webrtc::rtcp::goodbye::Goodbye;
 use webrtc::rtcp::header::PacketType;
 use webrtc::rtcp::packet::Packet as RtcpPacket;
@@ -60,7 +60,7 @@ pub struct LocalRouter {
     stop_sender_channel: Arc<Sender<()>>,
     config: RouterConfig,
     receivers: Arc<DashMap<String, Arc<WebRTCReceiver>>>,
-    buffer_factory: Arc<AtomicFactory>,
+    pub buffer_factory: Arc<AtomicFactory>,
     rtcp_writer_handler: Arc<Mutex<Option<RtcpWriterFn>>>,
     room: Weak<Room>,
     on_add_receiver_track_handler: Arc<Mutex<Option<OnAddReciverTrackFn>>>,
@@ -158,7 +158,7 @@ impl LocalRouter {
             ],
         };
         
-        let down_track_arc = match consumer.new_local_track(codec_capability, &receiver).await {
+        let down_track_arc = match consumer.new_local_track(codec_capability, &receiver, self.buffer_factory.clone()).await {
             Ok(dt) => dt,
             Err(peer::Error::ErrRTC(err)) => {
                 return Err(err.into());
@@ -178,33 +178,75 @@ impl LocalRouter {
         //let down_track_out = down_track_arc.clone();
         let track_id = down_track_arc.id().clone();
         down_track_arc
-            .on_close(Box::new(move || {
-                let track_id_in = track_id.clone();
-                debug!("[Downtrack {}] Do on_close (layer {layer})", track_id_in);
-                //let s_in = s_out.clone();
-                let receiver_in = r_out.clone();
-                //let down_track_in = down_track_out.clone();
-                Box::pin(async move {
-                    if let Err(err) = receiver_in.delete_down_track(layer, &track_id_in).await {
-                        warn!("delete_down_track failed: {err}");
-                    };
-                })
-            }))
-            .await;
-        /*
-        let s_out_1 = subscriber.clone();
-        let sid_out = receiver.stream_id();
-        
-        down_track_arc
-            .register_on_bind(Box::new(move || {
-                let s_in = s_out_1.clone();
-                let stream_id = sid_out.clone();
-                Box::pin(async move {
-                    s_in.send_reports_by_stream(&stream_id).await;
-                })
-            }))
-            .await;
-        */
+        .on_close(Box::new(move || {
+            let track_id_in = track_id.clone();
+            debug!("[Downtrack {}] Do on_close (layer {layer})", track_id_in);
+            //let s_in = s_out.clone();
+            let receiver_in = r_out.clone();
+            //let down_track_in = down_track_out.clone();
+            Box::pin(async move {
+                if let Err(err) = receiver_in.delete_down_track(layer, &track_id_in).await {
+                    warn!("delete_down_track failed: {err}");
+                };
+            })
+        }))
+        .await;
+        let c_out = Arc::downgrade(&consumer);
+        let dt_out = down_track_arc.clone();
+        let factory = self.buffer_factory.clone();
+        down_track_arc.on_bind(Box::new(move || {
+            let consumer_in = c_out.clone();
+            let dt_in = dt_out.clone();
+            let chunks = dt_in.create_source_description_chunks();
+            let packets: Vec<Box<dyn RtcpPacket + Send + Sync>> = vec![
+                Box::new(SourceDescription { chunks: chunks.clone() }),
+            ];
+            let mut interval = interval(Duration::from_secs(5));
+            //let factory_in = factory.clone();
+            let rtcp_forwarder = factory.get_rtcp_buffer(dt_in.ssrc());
+            Box::pin(async move {
+                let Some(transceiver) = &dt_in.transceiver else {
+                    warn!("Expected transceiver for downtrack {}", dt_in.id());
+                    return;
+                };
+                let sender = transceiver.sender().await;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            trace!("Write {} SDES chunks", packets.len());
+                            match consumer_in.upgrade() {
+                                Some(consumer) => {
+                                    if let Err(err) = consumer.write_rtcp(packets.clone()).await {
+                                        warn!("Write failed: {err}. Exit loop.");
+                                        break;
+                                    };
+                                },
+                                _ => {
+                                    break;
+                                },
+                            }
+                        },
+                        result = sender.read_rtcp() => {
+                            match result {
+                                Ok((pkts, _)) => {
+                                    match &rtcp_forwarder {
+                                        Some(rtcp) => rtcp.send_packets(pkts).await,
+                                        _ => {
+                                            debug!("No rtcp forwarder for {}", dt_in.ssrc());
+                                        },
+                                    };
+                                },
+                                Err(err) => {
+                                    debug!("dt read rtcp error: {err}");
+                                    break;
+                                },
+                            }
+                        },
+                        // TODO: close channel
+                    }
+                }
+            })
+        })).await;
         
         // Task: Forward RTP
         let receiver_1 = receiver.clone();
@@ -306,7 +348,7 @@ impl LocalRouter {
         let track_id = track.id();
         let stream_id = track.stream_id();
         let mut published = false;
-        let buffer = self.buffer_factory.get_or_new_buffer(track.ssrc()).await;
+        let buffer = self.buffer_factory.get_or_new_buffer(track.ssrc());
         let sender = self.rtcp_sender_channel.clone();
         buffer
             .register_on_feedback(Box::new(
@@ -328,16 +370,16 @@ impl LocalRouter {
                 buffer
                     .register_on_audio_level(Box::new(move |voice, level| {
                         let audio_observer_in = audio_observer.clone();
-                        let stream_id_in = stream_id_out.clone();
+                        let stream_id = stream_id_out.clone();
                         Box::pin(async move {
                             if !voice {
-                                debug!("Skip observation");
+                                debug!("[Stream {stream_id}] Skip invalid audio level.");
                                 return;
                             }
                             audio_observer_in
                                 .lock()
                                 .await
-                                .observe(&stream_id_in, level)
+                                .observe(&stream_id, level)
                                 .await;
                         })
                     }))
@@ -359,8 +401,7 @@ impl LocalRouter {
 
         let rtcp_reader = self
             .buffer_factory
-            .get_or_new_rtcp_buffer(track.ssrc())
-            .await;
+            .get_or_new_rtcp_buffer(track.ssrc());
         //let stats_out = Arc::clone(&self.stats);
         let buffer_out = Arc::clone(&buffer);
         let with_status = self.config.with_stats;
@@ -399,7 +440,7 @@ impl LocalRouter {
                                 if let Some(bye) = pkt.as_any().downcast_ref::<Goodbye>() {
                                     debug!("Bye packet");
                                     for ssrc in &bye.sources {
-                                        match factory_in.get_rtp_buffer(*ssrc).await {
+                                        match factory_in.get_rtp_buffer(*ssrc) {
                                             Some(buffer) => {
                                                 // this function always returns Ok
                                                 debug!("Closing buffer ssrc={ssrc}");

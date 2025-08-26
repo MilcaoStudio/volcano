@@ -72,7 +72,7 @@ pub struct DownTrackInternal {
     max_track: u32,
     payload_type: AtomicU8,
     sequencer: Arc<RwLock<AtomicSequencer>>,
-    buffer_factory: AtomicFactory,
+    buffer_factory: Arc<AtomicFactory>,
     /// Whether the track is enabled (unmuted).
     enabled: Arc<AtomicBool>,
     /// Whether the track is re-synced.
@@ -87,7 +87,7 @@ pub struct DownTrackInternal {
 }
 
 impl DownTrackInternal {
-    pub(crate) fn new(c: RTCRtpCodecCapability, r: &Arc<WebRTCReceiver>, max_track: u32) -> Self {
+    pub(crate) fn new(c: RTCRtpCodecCapability, r: &Arc<WebRTCReceiver>, max_track: u32, factory: Arc<AtomicFactory>) -> Self {
         Self {
             codec: c,
             id: r.track_id(),
@@ -99,7 +99,7 @@ impl DownTrackInternal {
             max_track,
             payload_type: Default::default(),
             sequencer: RwLock::new(AtomicSequencer::new(max_track)).into(),
-            buffer_factory: AtomicFactory::default(),
+            buffer_factory: factory,
             enabled: Default::default(),
             re_sync: Default::default(),
             last_ssrc: Default::default(),
@@ -137,18 +137,23 @@ impl TrackLocal for DownTrackInternal {
         self.re_sync.store(true, Ordering::Release);
         self.enabled.store(true, Ordering::Release);
         
-        let mut write_stream = self.write_stream.write().await;
-        *write_stream = Some(t.write_stream());
-        let mut mime = self.mime.write().await;
-        *mime = codec.capability.mime_type.to_lowercase();
+        {
+            let mut write_stream = self.write_stream.write().await;
+            *write_stream = Some(t.write_stream());
+        }
+        
+        {
+            let mut mime = self.mime.write().await;
+            *mime = codec.capability.mime_type.to_lowercase();
+        }
 
-        let rtcp = self.buffer_factory.get_or_new_rtcp_buffer(t.ssrc()).await;
+        let rtcp = self.buffer_factory.get_or_new_rtcp_buffer(t.ssrc());
 
         let sequencer = self.sequencer.clone();
         let receiver = self.receiver.clone();
         let enabled_out = self.enabled.clone();
         let last_ssrc_out = self.last_ssrc.clone();
-        let ssrc_out = self.last_ssrc.clone();
+        let ssrc_out = self.ssrc.clone();
 
         rtcp.set_on_packets(Box::new(move |pkts| {
             let sqncr_in = sequencer.clone();
@@ -166,6 +171,8 @@ impl TrackLocal for DownTrackInternal {
                     } else {
                         trace!("[Track {}] Cannot send RTCP because track is muted.", receiver.track_id())
                     }
+                } else {
+                    debug!("RTCP forwarding disabled. WebRTCReceiver dropped.");
                 }
             })
         }))
@@ -177,6 +184,12 @@ impl TrackLocal for DownTrackInternal {
         }
 
         self.bound.store(true, Ordering::Relaxed);
+        let on_bind_handler = self.on_bind_handler.clone();
+        tokio::spawn(async move {
+            if let Some(handler) = on_bind_handler.read().await.as_ref() {
+                handler().await;
+            }
+        });
         Ok(codec)
     }
 
@@ -276,6 +289,7 @@ impl DownTrack {
         r: &Arc<WebRTCReceiver>,
         cname: String,
         max_track: u32,
+        factory: Arc<AtomicFactory>,
     ) -> Self {
         Self {
             cname,
@@ -298,7 +312,7 @@ impl DownTrack {
             octet_count: AtomicU32::default(),
             packet_count: AtomicU32::default(),
             //max_packet_ts: 0,
-            down_track_local: Arc::new(DownTrackInternal::new(c, r, max_track)),
+            down_track_local: Arc::new(DownTrackInternal::new(c, r, max_track, factory)),
             packet_sent_count: AtomicU32::default(),
             last_stats: Instant::now().into(),
         }
@@ -320,7 +334,7 @@ impl DownTrack {
     /// Creates a source description chunk for the track.
     /// # Returns
     /// A vector of source description chunks, may be empty
-    pub async fn create_source_description_chunks(&self) -> Vec<SourceDescriptionChunk> {
+    pub fn create_source_description_chunks(&self) -> Vec<SourceDescriptionChunk> {
         use webrtc::rtcp::source_description::{SourceDescriptionItem, SdesType::SdesCname};
 
         if !self.bound() {

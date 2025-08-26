@@ -14,12 +14,14 @@ pub type OnCloseFn = Box<dyn (FnMut() -> Pin<Box<dyn Future<Output = ()> + Send>
 
 #[derive(Default)]
 pub struct RTCPForwarder {
+    ssrc: u32,
     on_packets_handler: Arc<Mutex<Option<OnPacketBatchFn>>>,
 }
 
 impl RTCPForwarder {
-    pub fn new() -> Self {
+    pub fn new(ssrc: u32) -> Self {
         Self {
+            ssrc,
             on_packets_handler: Arc::default(),
         }
     }
@@ -36,7 +38,7 @@ impl RTCPForwarder {
         if let Some(f) = handler.as_mut() {
             f(packets).await;
         } else {
-            trace!("No callback set. {} RTCP packets lost.", packets.len());
+            trace!("[ssrc={}] No callback set. {} RTCP packets lost.", self.ssrc, packets.len());
         }
     }
 }

@@ -49,6 +49,15 @@ pub struct ReceiverLayer {
 }
 
 impl ReceiverLayer {
+
+    /// Closes this layer, call this fn more than once has no effect.
+    async fn close(&self) {
+        // Stop RTP & RTCP
+        self.active_sender.send_replace(false);
+        // Dispose all down tracks
+        self.dispose_all_down_tracks().await;
+    }
+
     /// Moves every down track into disposed tracks.
     async fn dispose_all_down_tracks(&self) {
         let mut down_tracks = self.down_tracks.lock().await;
@@ -104,7 +113,7 @@ impl ReceiverLayer {
                                 buffer.write(pkt).await;
                             },
                             Err(err) => {
-                                debug!("Error reading RTP packet: {err}. Exit loop.");
+                                debug!("Error reading RTP packet: {err}. Exit RTP loop.");
                                 break;
                             }
                         }
@@ -113,7 +122,7 @@ impl ReceiverLayer {
                         if *rx_1.borrow_and_update() {
                             debug!("Layer {layer} has changed to active.");
                         } else {
-                            debug!("Layer {layer} has changed to inactive. Exit loop.");
+                            debug!("Layer {layer} has changed to inactive. Exit RTP loop.");
                             break;
                         }
                     }
@@ -134,7 +143,7 @@ impl ReceiverLayer {
                                 reader.send_packets(pkts).await;
                             },
                             Err(err) => {
-                                debug!("Error reading RTP packet: {err}. Exit loop.");
+                                debug!("Error reading RTP packet: {err}. Exit RTCP loop.");
                                 break;
                             },
                         }
@@ -143,7 +152,7 @@ impl ReceiverLayer {
                         if *rx_2.borrow_and_update() {
                             debug!("Layer {layer} has changed to active.");
                         } else {
-                            debug!("Layer {layer} has changed to inactive. Exit loop.");
+                            debug!("Layer {layer} has changed to inactive. Exit RTCP loop.");
                             break;
                         }
                     }
@@ -157,9 +166,10 @@ impl ReceiverLayer {
         if let Some(idx) = down_tracks.iter().position(|dt| dt.id() == id) {
             let dt = down_tracks.swap_remove(idx);
 
+            /*
             if down_tracks.is_empty() {
                 self.active_sender.send_replace(false);
-            }
+            }*/
             
             drop(down_tracks);
             
@@ -277,7 +287,7 @@ pub trait Receiver: Send + Sync {
     /// Registers a function to be called when the receiver is closed.
     async fn register_on_close(&self, f: OnCloseHandlerFn);
 
-    /// Sends RTCP packets to the receiver.
+    /// Sends RTCP packets back to the uptracks
     /// # Arguments
     /// - `p`: RTCP packets to send.
     /// # Errors
@@ -591,8 +601,6 @@ impl Receiver for WebRTCReceiver {
         use webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 
         let mut fwd_pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> = Vec::new();
-        let mut pli_once = true;
-        let mut fir_once = true;
 
         let mut max_rate_packet_loss: u8 = 0;
         let mut expected_min_bitrate: u64 = 0;
@@ -605,24 +613,18 @@ impl Receiver for WebRTCReceiver {
             if let Some(picture_loss_indication) =
                 pkt.as_any().downcast_ref::<PictureLossIndication>()
             {
-                if pli_once {
                     let mut pli = picture_loss_indication.clone();
                     pli.media_ssrc = last_ssrc;
                     pli.sender_ssrc = ssrc;
 
                     fwd_pkts.push(Box::new(pli));
-                    pli_once = false;
-                }
             } else if let Some(full_intra_request) = pkt.as_any().downcast_ref::<FullIntraRequest>()
             {
-                if fir_once {
                     let mut fir = full_intra_request.clone();
                     fir.media_ssrc = last_ssrc;
                     fir.sender_ssrc = ssrc;
 
                     fwd_pkts.push(Box::new(fir));
-                    fir_once = false;
-                }
             } else if let Some(receiver_estimated_max_bitrate) =
                 pkt.as_any()
                     .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
@@ -658,6 +660,7 @@ impl Receiver for WebRTCReceiver {
             }
         }
 
+        trace!("Forwarding {} RTCP to up track", fwd_pkts.len());
         if !fwd_pkts.is_empty() {
             if let Err(err) = self.send_rtcp(fwd_pkts).await {
                 warn!("send_rtcp err:{}", err);
@@ -913,7 +916,20 @@ impl WebRTCReceiver {
     /// Closes all the not available tracks of the receiver, and set the receiver to closed state.
     /// Calls the on_close handler if it is set.
     pub async fn close_tracks(&self) {
+
+        if self.closed.swap(true, Ordering::Relaxed) {
+            debug!("[Receiver {}] Already closed. Operation skipped.", self.track_id);
+            return;
+        }
+
         for layer_opt in self.layers.read().await.as_ref() {
+
+            if let Some(layer) = layer_opt {
+                layer.close().await;
+            }
+            
+            /* Downtrack should not be closed by receiver
+
             let Some(down_tracks) = layer_opt.as_ref().map(|l| &l.down_tracks) else {
                 continue;
             };
@@ -921,13 +937,10 @@ impl WebRTCReceiver {
             if guard.is_empty() {
                 continue;
             }
-
             for dt in guard.deref() {
                 dt.close().await;
-            }
+            }*/
         }
-
-        self.closed.store(true, Ordering::Relaxed);
 
         if let Some(close_handler) = &mut *self.on_close_handler.lock().await {
             close_handler().await;

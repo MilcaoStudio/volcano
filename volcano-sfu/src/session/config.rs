@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use tokio::{net::UdpSocket, sync::Mutex};
+use tokio::net::UdpSocket;
 use webrtc::{
     api::setting_engine::SettingEngine,
     ice::{
@@ -69,7 +69,7 @@ pub struct WebRTCTransportConfig {
     pub ice_servers: Vec<RTCIceServer>,
     pub setting: SettingEngine,
     pub router: RouterConfig,
-    pub factory: Arc<Mutex<AtomicFactory>>,
+    pub factory: Arc<AtomicFactory>,
     pub port_map: PortMap,
 }
 

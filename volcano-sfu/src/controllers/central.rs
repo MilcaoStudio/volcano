@@ -8,34 +8,24 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::{sync::Mutex, time::sleep};
 use webrtc::{
-    data_channel::RTCDataChannel,
-    ice_transport::{
+    data_channel::RTCDataChannel, ice_transport::{
         ice_candidate::RTCIceCandidateInit, ice_connection_state::RTCIceConnectionState,
-    },
-    peer_connection::{
-        OnDataChannelHdlrFn, RTCPeerConnection, configuration::RTCConfiguration,
-        offer_answer_options::RTCOfferOptions, peer_connection_state::RTCPeerConnectionState,
-        sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState,
-    },
-    rtp_transceiver::{
-        RTCRtpTransceiverInit, rtp_codec::RTCRtpCodecCapability,
-        rtp_transceiver_direction::RTCRtpTransceiverDirection,
-    },
+    }, peer_connection::{
+        configuration::RTCConfiguration, offer_answer_options::RTCOfferOptions, peer_connection_state::RTCPeerConnectionState, sdp::session_description::RTCSessionDescription, signaling_state::RTCSignalingState, OnDataChannelHdlrFn, RTCPeerConnection
+    }, rtcp, rtp_transceiver::{
+        rtp_codec::RTCRtpCodecCapability, rtp_transceiver_direction::RTCRtpTransceiverDirection, RTCRtpTransceiverInit
+    }
 };
 
 use crate::{
-    controllers::{PeerController, PeerControllerError, Result},
-    peer::{
-        API_CHANNEL_LABEL, Consumer, OnICECandidateFn, OnICEConnectionStateChangeFn, OnOfferFn,
-        Result as PeerResult, api,
-    },
-    session::{config::WebRTCTransportConfig, room::Room},
-    track::{
+    controllers::{PeerController, PeerControllerError, Result}, packet::AtomicFactory, peer::{
+        api, Consumer, OnICECandidateFn, OnICEConnectionStateChangeFn, OnOfferFn, Result as PeerResult, API_CHANNEL_LABEL
+    }, session::{config::WebRTCTransportConfig, room::Room}, track::{
         downtrack::{DownTrack, DownTrackInternal},
         message::RemoteMedia,
         receiver::{Receiver, WebRTCReceiver},
         router::LocalRouter,
-    },
+    }
 };
 
 /// Peer consuming a [RTCPeerConnection] and a [RTCDataChannel]
@@ -121,6 +111,7 @@ impl CentralController {
             codec_capability,
             &receiver,
             self.config.router.max_packet_track,
+            self.config.factory.clone(),
         ));
 
         let transceiver = match &*self.pc.lock().await {
@@ -380,7 +371,7 @@ impl CentralController {
                 if !dt.bound() {
                     continue;
                 }
-                let mut dcs = dt.create_source_description_chunks().await;
+                let mut dcs = dt.create_source_description_chunks();
                 sds.append(&mut dcs);
             }
         }
@@ -725,12 +716,14 @@ impl Consumer for CentralConsumer {
         &self,
         codec_capability: RTCRtpCodecCapability,
         receiver: &Arc<WebRTCReceiver>,
+        factory: Arc<AtomicFactory>,
     ) -> PeerResult<Arc<DownTrack>> {
         // New local down track
         let local_track = Arc::new(DownTrackInternal::new(
             codec_capability,
             receiver,
             self.rtp_packet_capacity,
+            factory,
         ));
         let transceiver = self
             .pc
@@ -802,6 +795,11 @@ impl Consumer for CentralConsumer {
             }
         };
 
+        Ok(())
+    }
+
+    async fn write_rtcp(&self, pkts: Vec<Box<dyn rtcp::packet::Packet + Send + Sync>>) -> PeerResult<()> {
+        self.pc.write_rtcp(&pkts[..]).await?;
         Ok(())
     }
 }

@@ -13,6 +13,7 @@ use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
 use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::rtcp;
 use webrtc::rtcp::source_description::SourceDescription;
 use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability};
@@ -22,6 +23,7 @@ use webrtc::{data_channel::RTCDataChannel,
 };
 
 use super::{OnOfferFn, api};
+use crate::packet::AtomicFactory;
 use crate::peer::consumer::Consumer;
 use crate::session::config::WebRTCTransportConfig;
 use crate::track::downtrack::{DownTrack, DownTrackInternal};
@@ -36,7 +38,7 @@ pub struct Subscriber {
     pub pc: Arc<RTCPeerConnection>,
     //pub media_engine: Arc<Mutex<MediaEngine>>,
 
-    api_channel: Arc<RTCDataChannel>,
+    //api_channel: Arc<RTCDataChannel>,
     config: Arc<WebRTCTransportConfig>,
     tracks: DashMap<String, Arc<DownTrack>>,
     stream_tracks: DashMap<String, Vec<String>>,
@@ -47,7 +49,7 @@ pub struct Subscriber {
     on_renegotiate_fn: Arc<Mutex<Option<OnRenegotiateFn>>>,
     pub no_auto_subscribe: bool,
     negotiation_pending: Arc<AtomicBool>,
-    api_channel_open: Arc<AtomicBool>,
+    //api_channel_open: Arc<AtomicBool>,
     remote_answer_pending: Arc<AtomicBool>,
     session_version: Arc<AtomicU64>,
 }
@@ -59,11 +61,11 @@ pub type OnRenegotiateFn = Box<
 impl Subscriber {
     pub async fn new(id: String, config: Arc<WebRTCTransportConfig>) -> Result<Self> {
         let pc = api::create_subscriber_connection(&config.clone()).await?;
-        let open = Arc::new(AtomicBool::default());
-        let api_channel = api::create_api_data_channel(&pc, id.clone(), open.clone()).await?;
+        //let open = Arc::new(AtomicBool::default());
+        //let api_channel = api::create_api_data_channel(&pc, id.clone(), open.clone()).await?;
 
         let subscriber = Subscriber {
-            api_channel,
+            //api_channel,
             config,
             id,
             pc,
@@ -78,7 +80,7 @@ impl Subscriber {
             no_auto_subscribe: Default::default(),
             negotiation_pending: Default::default(),
             remote_answer_pending: Default::default(),
-            api_channel_open: open,
+            //api_channel_open: open,
             session_version: Default::default(),
         };
         Ok(subscriber)
@@ -227,10 +229,6 @@ impl Subscriber {
         info!("subscriber::add_ice_candidate add candidate into candidates vector");
         self.candidates.lock().await.push(candidate);
         Ok(())
-    }
-
-    pub fn api_channel(&self) -> Arc<RTCDataChannel> {
-        self.api_channel.clone()
     }
 
     pub async fn register_data_channel(&self, label: String, dc: Arc<RTCDataChannel>) {
@@ -394,19 +392,7 @@ impl Subscriber {
             self.stream_tracks.remove(stream_id);
         }
     }
-
-    pub async fn send_message(&self, content: &str) -> Result<()> {
-        let open = self.api_channel_open.load(Ordering::Acquire);
-        if !open {
-            return Err(webrtc::Error::ErrClosedPipe.into());
-        }
-
-        match self.api_channel.send_text(content).await {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    }
-
+    
     pub async fn send_reports_by_stream(&self, stream_id: &String) {
         let mut sds = Vec::new();
         let mut rtcp_packets: Vec<Box<(dyn webrtc::rtcp::packet::Packet + Send + Sync + 'static)>> =
@@ -418,7 +404,7 @@ impl Subscriber {
             if !dt.bound() {
                 continue;
             }
-            let mut chunks = dt.create_source_description_chunks().await;
+            let mut chunks = dt.create_source_description_chunks();
             sds.append(&mut chunks);
         }
 
@@ -500,12 +486,14 @@ impl Consumer for Subscriber {
         &self,
         codec_capability: RTCRtpCodecCapability,
         receiver: &Arc<WebRTCReceiver>,
+        factory: Arc<AtomicFactory>,
     ) -> super::Result<Arc<DownTrack>> {
         // New local down track
         let local_track = Arc::new(DownTrackInternal::new(
             codec_capability,
             receiver,
             self.config.router.max_packet_track,
+            factory,
         ));
         let transceiver = self
             .pc
@@ -572,6 +560,11 @@ impl Consumer for Subscriber {
             }
         };
 
+        Ok(())
+    }
+
+    async fn write_rtcp(&self, pkts: Vec<Box<dyn rtcp::packet::Packet + Send + Sync>>) -> super::Result<()> {
+        self.pc.write_rtcp(&pkts[..]).await?;
         Ok(())
     }
 }
