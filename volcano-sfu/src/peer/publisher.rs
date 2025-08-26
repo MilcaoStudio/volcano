@@ -200,11 +200,12 @@ impl Publisher {
                         })
                     }
                     let recv_tracks = receiver_2.tracks().await;
+                    let mid = transceiver.mid().unwrap_or_default();
                     let tracks = recv_tracks.iter().map(|t| (t.id(), t.rid())).collect::<Vec<_>>();
                     if let Some(room) = room_in.upgrade() {
                         for (track_id, track_rid) in tracks {
-                            info!("[Publisher {}] Adding track {} [{}] to user", user_id_in, track_id, track_rid);
-                            room.add_user_track(user_id_in.clone(), track_stream_id.clone(), track_id, track_rid.len() > 0);
+                            info!("[Publisher {}] Adding track id={} mid={} [{}] to user", user_id_in, track_id, mid, track_rid);
+                            room.add_user_track(user_id_in.clone(), track_stream_id.clone(), track_id, track_rid.len() > 0, mid.to_string());
                         }
                     }
                 })

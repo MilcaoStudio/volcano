@@ -42,6 +42,7 @@ impl From<Arc<dyn PeerController>> for ArcPeerController {
 pub struct UserStream {
     pub id: String,
     pub tracks: Vec<String>,
+    pub mids: Vec<String>,
     pub simulcast: bool,
 }
 
@@ -80,6 +81,7 @@ pub enum RoomEvent {
     TrackAdded {
         room_id: String,
         uid: String,
+        mid: String,
         track: String,
         stream: UserStream,
     },
@@ -200,9 +202,9 @@ impl Room {
 
 
     /// Adds a track for the given user, looking up for existing streams and pushing
-    pub fn add_user_track(&self, user_id: String, stream_id: String, track_id: String, simulcast: bool) {
-
+    pub fn add_user_track(&self, user_id: String, stream_id: String, track_id: String, simulcast: bool, mid: String) {
         let track_id_1 = track_id.clone();
+        let mid_1 = mid.clone();
         let updated = match self.user_streams.entry(user_id.clone()) {
             Entry::Occupied(mut entry) => {
                 let streams = entry.get_mut();
@@ -211,6 +213,7 @@ impl Room {
                     // Case 1: Exists stream with same id, push track id in stream
                     Some(stream) => {
                         stream.tracks.push(track_id_1);
+                        stream.mids.push(mid_1);
                         stream.clone()
                     },
                     // Case 2: Does not exist stream with that id, push stream
@@ -218,6 +221,7 @@ impl Room {
                         let new_stream = UserStream {
                             id: stream_id,
                             tracks: vec![track_id_1],
+                            mids: vec![mid_1],
                             simulcast,
                         };
                         streams.push(new_stream.clone());
@@ -230,6 +234,7 @@ impl Room {
                 let s = UserStream {
                     id: stream_id,
                     tracks: vec![track_id_1],
+                    mids: vec![mid_1],
                     simulcast,
                 };
                 entry.insert(vec![s.clone()]);
@@ -237,7 +242,7 @@ impl Room {
             }
         };
         
-        let ev = RoomEvent::TrackAdded { room_id: self.id.clone(), uid: user_id, track: track_id, stream: updated };
+        let ev = RoomEvent::TrackAdded { mid, room_id: self.id.clone(), uid: user_id, track: track_id, stream: updated };
 
         self.trigger_event(ev);
     }
@@ -256,22 +261,23 @@ impl Room {
     }
 
     // PubSubController is currently the unique use case calling this function.
+    /// Every peer in this room subscribes to provided peer. Then the provided peer calls for negotiation.
     pub async fn subscribe_peer(&self, peer: Arc<PubSubController>) {
         // Removed massive data channel creation
         
+        let peer_id = peer.id();
         if let Ok(router) = peer.router().await {
             router.start_audio_observer_task().await;
         }
 
         for cur_peer in self.peers.iter() {
             let cur_id = cur_peer.id();
-            let peer_id = peer.id();
             if cur_id == peer_id {
                 continue;
             }
 
             if let Ok(current_router) = cur_peer.router().await {
-                info!(
+                debug!(
                     "[Room {}] Peer {} subscribes to tracks from router {}. No receivers.",
                     self.id, peer_id, cur_id
                 );
@@ -294,10 +300,15 @@ impl Room {
             }
         }
 
-        info!("Subscribe Negotiate");
-        if let Err(err) = peer.subscriber().await.unwrap().negotiate(None).await {
-            error!("negotiate error: {}", err);
-        }
+        debug!("[Room {}] Peer {} requests negotiation (Reason: subscribe)", self.id, peer_id);
+        match peer.subscriber().await {
+            Some(subscriber) => {
+                if let Err(err) = subscriber.negotiate(None).await {
+                    warn!("negotiate error: {}", err);
+                }
+            }
+            _ => warn!("[Room {}] subscribe_peer Peer {} does not have subscriber available", self.id, peer_id),
+        };
     }
     /// Remove a user from the room
     pub async fn remove_user(&self, id: &str) {
