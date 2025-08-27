@@ -110,7 +110,7 @@ impl CentralController {
         let down_track_local = Arc::new(DownTrackInternal::new(
             codec_capability,
             &receiver,
-            self.config.router.max_packet_track,
+            self.config.router.max_packet_track as u16,
             self.config.factory.clone(),
         ));
 
@@ -230,7 +230,7 @@ impl CentralController {
             self.config.router.clone(),
         ));
         {
-            let packet_capacity = peer_config.router.max_packet_track;
+            let packet_capacity = peer_config.router.max_packet_track as u16;
             *self.router.lock().await = Some(router);
             let pc = api::create_central_connection(peer_config.into()).await?;
             self.register_handlers(&pc).await;
@@ -607,13 +607,13 @@ struct CentralConsumer {
     on_offer_fn: Arc<Mutex<Option<OnOfferFn>>>,
     // Peer connection must exist
     pc: Arc<RTCPeerConnection>,
-    rtp_packet_capacity: u32,
+    rtp_packet_capacity: u16,
     remote_answer_pending: Arc<AtomicBool>,
     tracks: DashMap<String, Arc<DownTrack>>,
 }
 
 impl CentralConsumer {
-    pub fn new(id: String, pc: Arc<RTCPeerConnection>, capacity: u32) -> Arc<Self> {
+    pub fn new(id: String, pc: Arc<RTCPeerConnection>, capacity: u16) -> Arc<Self> {
         Arc::new(Self {
             id,
             negotiation_pending: Default::default(),

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::{atomic::{AtomicU16, Ordering}, Arc}, time::Instant};
+use std::{collections::BTreeMap, sync::{atomic::{AtomicU16, Ordering}, Arc}, time::{Duration, Instant}};
 
 use tokio::sync::Mutex;
 const IGNORE_RETRANSMISSION: u8 = 100;
@@ -16,12 +16,8 @@ pub struct PacketMeta {
     // Modified timestamp for current associated
     // down track.
     pub timestamp: u32,
-    // The last time this packet was nack requested.
-    // Sometimes clients request the same packet more than once, so keep
-    // track of the requested packets helps to avoid writing multiple times
-    // the same packet.
-    // The resolution is 1 ms counting after the sequencer start time.
-    last_nack: u128,
+    // The last instant this packet was nack requested.
+    last_nack: Option<Instant>,
     // Spatial layer of packet
     pub layer: u8,
     // Information that differs depending the codec
@@ -43,7 +39,7 @@ struct Sequencer {
     seq: BTreeMap<u16, PacketMeta>,
     step: u16,
     head_sn: u16,
-    start_time: Instant,
+    //start_time: Instant,
 }
 
 impl Sequencer {
@@ -52,7 +48,7 @@ impl Sequencer {
         Self {
             max: max_track,
             seq: BTreeMap::new(),
-            start_time: Instant::now(),
+            //start_time: Instant::now(),
             init: false,
             step: 0,
             head_sn: 0,
@@ -66,9 +62,9 @@ pub struct AtomicSequencer {
 }
 
 impl AtomicSequencer {
-    pub fn new(max_track: u32) -> Self {
+    pub fn new(max_track: u16) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Sequencer::new(max_track as u16))),
+            inner: Arc::new(Mutex::new(Sequencer::new(max_track))),
             next: AtomicU16::default(),
         }
     }
@@ -154,7 +150,7 @@ impl AtomicSequencer {
     /// ```no_run
     /// let packets = downtrack.get_seq_no_pairs(&[1234, 5678]).await;
     /// for packet in packets {
-    ///     send_rtcp_nack(&packet).await?;
+    ///     write_rtp(&packet).await?;
     /// }
     /// ```
     pub async fn get_seq_no_pairs(&self, target_snos: &[u16]) -> Vec<PacketMeta> {
@@ -162,21 +158,17 @@ impl AtomicSequencer {
 
         let mut meta: Vec<PacketMeta> = Vec::new();
 
-        let elapsed = inner.start_time.elapsed().as_millis();
+        let now = Instant::now();
 
         for target in target_snos {
             if let Some(pkt) = inner.seq.get_mut(target) {
-                if &pkt.target_seq_no == target
-                    //&& (pkt.last_nack == 0
-                     //   || elapsed.saturating_sub(pkt.last_nack) > IGNORE_RETRANSMISSION as u128)
-                {
-                    let elapsed = if pkt.last_nack == 0 {
-                        (IGNORE_RETRANSMISSION + 1) as u128
-                    } else {
-                        elapsed.saturating_sub(pkt.last_nack)
+                if &pkt.target_seq_no == target {
+                    let elapsed = match pkt.last_nack {
+                        Some(last) => now.duration_since(last),
+                        _ => Duration::from_millis(IGNORE_RETRANSMISSION as u64 + 1),
                     };
-                    if elapsed > IGNORE_RETRANSMISSION as u128 {
-                        pkt.last_nack = elapsed;
+                    if elapsed > Duration::from_millis(IGNORE_RETRANSMISSION as u64) {
+                        pkt.last_nack = Some(Instant::now());
                         meta.push(pkt.clone());
                     }
                 }

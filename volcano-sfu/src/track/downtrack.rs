@@ -69,7 +69,7 @@ pub struct DownTrackInternal {
     mime: RwLock<String>,
     ssrc: Arc<AtomicU32>,
     stream_id: String,
-    max_track: u32,
+    max_sn: u16,
     payload_type: AtomicU8,
     sequencer: Arc<RwLock<AtomicSequencer>>,
     buffer_factory: Arc<AtomicFactory>,
@@ -87,7 +87,7 @@ pub struct DownTrackInternal {
 }
 
 impl DownTrackInternal {
-    pub(crate) fn new(c: RTCRtpCodecCapability, r: &Arc<WebRTCReceiver>, max_track: u32, factory: Arc<AtomicFactory>) -> Self {
+    pub(crate) fn new(c: RTCRtpCodecCapability, r: &Arc<WebRTCReceiver>, max_track: u16, factory: Arc<AtomicFactory>) -> Self {
         Self {
             codec: c,
             id: r.track_id(),
@@ -96,7 +96,7 @@ impl DownTrackInternal {
             mime: Default::default(),
             ssrc: Default::default(),
             stream_id: r.stream_id(),
-            max_track,
+            max_sn: max_track,
             payload_type: Default::default(),
             sequencer: RwLock::new(AtomicSequencer::new(max_track)).into(),
             buffer_factory: factory,
@@ -149,14 +149,14 @@ impl TrackLocal for DownTrackInternal {
 
         let rtcp = self.buffer_factory.get_or_new_rtcp_buffer(t.ssrc());
 
-        let sequencer = self.sequencer.clone();
+        //let sequencer = self.sequencer.clone();
         let receiver = self.receiver.clone();
         let enabled_out = self.enabled.clone();
         let last_ssrc_out = self.last_ssrc.clone();
         let ssrc_out = self.ssrc.clone();
 
         rtcp.set_on_packets(Box::new(move |pkts| {
-            let sqncr_in = sequencer.clone();
+            //let sqncr_in = sequencer.clone();
             let rcvr_in = receiver.clone();
             let enabled = enabled_out.clone();
             let last_ssrc_in = last_ssrc_out.clone();
@@ -164,10 +164,10 @@ impl TrackLocal for DownTrackInternal {
             Box::pin(async move {
                 if let Some(receiver) = rcvr_in.upgrade() {
                     if enabled.load(Ordering::Acquire) {
-                        let sequencer = sqncr_in.read().await;
+                        //let sequencer = sqncr_in.read().await;
                         let last_ssrc = last_ssrc_in.load(Ordering::Acquire);
                         let ssrc = ssrc_in.load(Ordering::Acquire);
-                        receiver.handle_rtcp(pkts, last_ssrc, ssrc, &sequencer).await;
+                        receiver.send_feedback_rtcp(pkts, last_ssrc, ssrc,).await;
                     } else {
                         trace!("[Track {}] Cannot send RTCP because track is muted.", receiver.track_id())
                     }
@@ -180,7 +180,7 @@ impl TrackLocal for DownTrackInternal {
 
         if self.codec.mime_type.starts_with("video/") {
             let mut sequencer = self.sequencer.write().await;
-            *sequencer = AtomicSequencer::new(self.max_track);
+            *sequencer = AtomicSequencer::new(self.max_sn);
         }
 
         self.bound.store(true, Ordering::Relaxed);
@@ -288,7 +288,7 @@ impl DownTrack {
         c: RTCRtpCodecCapability,
         r: &Arc<WebRTCReceiver>,
         cname: String,
-        max_track: u32,
+        max_track: u16,
         factory: Arc<AtomicFactory>,
     ) -> Self {
         Self {

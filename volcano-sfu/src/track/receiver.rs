@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use webrtc::rtcp::packet::Packet as RtcpPacket;
 
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use webrtc::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
 use webrtc::rtp::packet::Packet as RTP;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecParameters, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
@@ -23,7 +24,6 @@ use webrtc::util::Unmarshal;
 
 use crate::packet::rtcp::RTCPForwarder;
 use crate::packet::{AtomicBuffer, BufferIO, VP8};
-use crate::track::sequencer::AtomicSequencer;
 
 use super::downtrack::{DownTrack, DownTrackType};
 use super::error::{Error, Result};
@@ -263,12 +263,12 @@ pub trait Receiver: Send + Sync {
     /// Returns the maximum temporal layer of each layer.
     async fn get_max_temporal_layers(&self) -> Vec<i32>;
 
-    async fn handle_rtcp(
+    /// Processes and sends feedback packets to upstream.
+    async fn send_feedback_rtcp(
         &self,
         pkts: Vec<Box<dyn RtcpPacket + Send + Sync>>,
         last_ssrc: u32,
         ssrc: u32,
-        sequencer: &AtomicSequencer,
     );
 
     /// Retransmits all given packets into a given [DownTrack].
@@ -588,22 +588,21 @@ impl Receiver for WebRTCReceiver {
         }
     }
 
-    async fn handle_rtcp(
+    async fn send_feedback_rtcp(
         &self,
         pkts: Vec<Box<dyn RtcpPacket + Send + Sync>>,
         last_ssrc: u32,
         ssrc: u32,
-        _: &AtomicSequencer,
     ) {
         use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
-        use webrtc::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
+        //use webrtc::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
         use webrtc::rtcp::receiver_report::ReceiverReport;
-        use webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
+        //use webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 
         let mut fwd_pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> = Vec::new();
 
         let mut max_rate_packet_loss: u8 = 0;
-        let mut expected_min_bitrate: u64 = 0;
+        //let mut expected_min_bitrate: u64 = 0;
 
         if last_ssrc == 0 {
             return;
@@ -625,43 +624,41 @@ impl Receiver for WebRTCReceiver {
                     fir.sender_ssrc = ssrc;
 
                     fwd_pkts.push(Box::new(fir));
-            } else if let Some(receiver_estimated_max_bitrate) =
+            /*
+            } else if let Some(remb) =
                 pkt.as_any()
                     .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
             {
-                if expected_min_bitrate == 0
-                    || expected_min_bitrate > receiver_estimated_max_bitrate.bitrate as u64
-                {
-                    expected_min_bitrate = receiver_estimated_max_bitrate.bitrate as u64;
-                }
+                expected_min_bitrate = expected_min_bitrate
+                .min(remb.bitrate as u64)
+                .max(1);
+            */
             } else if let Some(receiver_report) = pkt.as_any().downcast_ref::<ReceiverReport>() {
                 for r in &receiver_report.reports {
-                    if max_rate_packet_loss == 0 || max_rate_packet_loss < r.fraction_lost {
+                    if max_rate_packet_loss < r.fraction_lost {
                         max_rate_packet_loss = r.fraction_lost;
                     }
                 }
-            } else if let Some(transport_layer_nack) =
+            /* webrtc-rs should respond to incoming NACK 
+            } else if let Some(layer_nack) =
                 pkt.as_any().downcast_ref::<TransportLayerNack>()
             {
-                debug!("webrtc-rs already retransmits packets back to peer connection. NACK packets ignored.");
-                debug!(
-                    "Packet retransmition disabled. Could not retransmit {} packets.",
-                    transport_layer_nack.nacks.len()
-                );
-                /*
-                let mut nacked_packets: Vec<PacketMeta> = Vec::new();
-                for pair in &transport_layer_nack.nacks {
-                    let seq_numbers = pair.packet_list();
-                    let mut pairs = sequencer.get_seq_no_pairs(&seq_numbers[..]).await;
-                    nacked_packets.append(&mut pairs);
-                }
+                let mut nack = layer_nack.clone();
+                nack.media_ssrc = last_ssrc;
+                nack.sender_ssrc = ssrc;
+                
+                fwd_pkts.push(Box::new(nack));
                 */
-                //   receiver.retransmit_packets(track, packets)
+            } else if let Some(layer_cc) = pkt.as_any().downcast_ref::<TransportLayerCc>() {
+                let mut cc = layer_cc.clone();
+                cc.media_ssrc = last_ssrc;
+                cc.sender_ssrc = ssrc;
+
+                fwd_pkts.push(Box::new(cc));
             }
         }
-
-        trace!("Forwarding {} RTCP to up track", fwd_pkts.len());
         if !fwd_pkts.is_empty() {
+            trace!("Forwarding {} RTCP to up track", fwd_pkts.len());
             if let Err(err) = self.send_rtcp(fwd_pkts).await {
                 warn!("send_rtcp err:{}", err);
             }

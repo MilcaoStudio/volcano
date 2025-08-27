@@ -492,7 +492,7 @@ impl Consumer for Subscriber {
         let local_track = Arc::new(DownTrackInternal::new(
             codec_capability,
             receiver,
-            self.config.router.max_packet_track,
+            self.config.router.max_packet_track as u16,
             factory,
         ));
         let transceiver = self
