@@ -43,6 +43,9 @@ sdpsemantics = "unified-plan"
 # toggle multicast dns support: https://tools.ietf.org/html/draft-mdns-ice-candidates-00
 mdns = false
 
+# Enable RTX codecs for RTP retransmition
+rtx = true
+
 # if sfu behind nat, set iceserver
 [[webrtc.iceservers]]
 urls = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]

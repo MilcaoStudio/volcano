@@ -5,7 +5,7 @@ use webrtc::{
         interceptor_registry::register_default_interceptors,
         media_engine::MediaEngine,
         APIBuilder,
-    }, data_channel::{data_channel_init::RTCDataChannelInit, RTCDataChannel}, error::Result, interceptor::registry::Registry, peer_connection::{configuration::RTCConfiguration, RTCPeerConnection}, rtp_transceiver::rtp_codec::{RTCRtpHeaderExtensionCapability, RTPCodecType}, sdp::extmap
+    }, data_channel::{data_channel_init::RTCDataChannelInit, RTCDataChannel}, error::Result, interceptor::registry::Registry, peer_connection::{configuration::RTCConfiguration, RTCPeerConnection}, rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTCRtpHeaderExtensionCapability, RTPCodecType}, sdp::extmap
 };
 
 use crate::{session::config::WebRTCTransportConfig, track::{downtrack::DownTrack, message::RemoteMedia}};
@@ -27,7 +27,11 @@ pub async fn create_subscriber_connection(cfg: &Arc<WebRTCTransportConfig>) -> R
     // Create a MediaEngine object to configure the supported codec
     let mut m = MediaEngine::default();
     m.register_default_codecs()?;
-   
+    
+    if cfg.rtx_enabled {
+        register_rtx_codecs(&mut m);
+    }
+    
     // Create a InterceptorRegistry. This is the user configurable RTP/RTCP Pipeline.
     // This provides NACKs, RTCP Reports and other features. If you use `webrtc.NewPeerConnection`
     // this is enabled by default. If you are manually managing You MUST create a InterceptorRegistry
@@ -84,6 +88,11 @@ pub async fn create_publisher_connection(cfg: WebRTCTransportConfig) -> Result<A
 pub async fn create_central_connection(cfg: Arc<WebRTCTransportConfig>) -> Result<Arc<RTCPeerConnection>> {
     let mut m = MediaEngine::default();
     m.register_default_codecs()?;
+
+    if cfg.rtx_enabled {
+        register_rtx_codecs(&mut m);
+    }
+    
     set_header_extensions(&mut m);
     let registry = register_default_interceptors(Registry::new(), &mut m)?;
     let setting_engine = cfg.setting.clone();
@@ -214,6 +223,36 @@ pub async fn process_remote_media(remote_media: &RemoteMedia, down_tracks: &Vec<
                 }
             }
             RTPCodecType::Unspecified => {}
+        }
+    }
+}
+
+fn new_video_rtx_params(original_pt: u8, rtx_pt: u8) -> RTCRtpCodecParameters {
+    RTCRtpCodecParameters {
+        capability: RTCRtpCodecCapability {
+            mime_type: "video/rtx".to_owned(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: format!("apt={}", original_pt),
+            rtcp_feedback: vec![],
+        },
+        payload_type: rtx_pt,
+        ..Default::default()
+    }
+}
+
+fn register_rtx_codecs(m: &mut MediaEngine) {
+    for codec in vec![
+        new_video_rtx_params(96, 97),
+        new_video_rtx_params(98, 99),
+        new_video_rtx_params(100, 101),
+        new_video_rtx_params(102, 103),
+        new_video_rtx_params(123, 122),
+        new_video_rtx_params(125, 124),
+    ] {
+        let mime = codec.capability.mime_type.clone();
+        if let Err(err) = m.register_codec(codec, RTPCodecType::Video) {
+            warn!("Register codec {mime} failed: {err}");
         }
     }
 }

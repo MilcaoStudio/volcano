@@ -69,6 +69,7 @@ pub struct WebRTCTransportConfig {
     pub ice_servers: Vec<RTCIceServer>,
     pub setting: SettingEngine,
     pub router: RouterConfig,
+    pub rtx_enabled: bool,
     pub factory: Arc<AtomicFactory>,
     pub port_map: PortMap,
 }
@@ -95,6 +96,7 @@ pub struct WebRTCConfig {
     pub sdp_semantics: String,
     #[serde(rename = "mdns")]
     mdns: bool,
+    rtx: bool,
     timeouts: WebRTCTimeoutsConfig,
 }
 
@@ -250,6 +252,8 @@ impl WebRTCTransportConfig {
 
         se.set_network_types(network_types);
 
+        se.enable_sender_rtx(c.webrtc.rtx);
+
         WebRTCTransportConfig {
             configuration: RTCConfiguration {
                 ice_servers: if !ice_lite {
@@ -262,6 +266,7 @@ impl WebRTCTransportConfig {
             ice_servers,
             setting: se,
             router: c.router.clone(),
+            rtx_enabled: c.webrtc.rtx,
             factory: Arc::default(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             port_map,
