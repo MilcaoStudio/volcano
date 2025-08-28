@@ -134,13 +134,13 @@ impl CentralController {
         };
 
         // New local track
-        let mut down_track = DownTrack::new_track_local(self.id.clone(), down_track_local);
+        let down_track = DownTrack::new_track_local(self.id.clone(), down_track_local);
         info!(
             "[Peer {}] add_down_track New local track created {}",
             self.id,
             down_track.id()
         );
-        down_track.set_transceiver(transceiver.clone());
+        down_track.set_transceiver(transceiver.clone()).await;
         let down_track_arc = Arc::new(down_track);
 
         let peer_1 = self.clone();
@@ -736,8 +736,8 @@ impl Consumer for CentralConsumer {
             )
             .await?;
         // New local track
-        let mut down_track = DownTrack::new_track_local(self.id.clone(), local_track);
-        down_track.set_transceiver(transceiver.clone());
+        let down_track = DownTrack::new_track_local(self.id.clone(), local_track);
+        down_track.set_transceiver(transceiver.clone()).await;
         let down_track_arc = Arc::new(down_track);
         Ok(down_track_arc)
     }
@@ -752,7 +752,7 @@ impl Consumer for CentralConsumer {
             None => return Ok(()), // Track already removed
         };
 
-        let sender = match &down_track.transceiver {
+        let sender = match &*down_track.transceiver.read().await {
             Some(t) => t.sender().await,
             None => {
                 warn!("DownTrack {} has no transceiver", track_id);

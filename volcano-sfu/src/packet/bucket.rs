@@ -1,4 +1,8 @@
+use std::collections::{BTreeMap, VecDeque};
+
 use byteorder::{BigEndian, ByteOrder};
+use bytes::BytesMut;
+use webrtc::rtp::packet::Packet;
 
 use super::error::{BufferError, Result};
 
@@ -212,6 +216,62 @@ impl Bucket {
         BigEndian::read_u16(&pkt[padding..])
     }
 }
+
+/// This bucket stores RTP packets as RTX.
+pub struct RtxBucket {
+    capacity: usize,
+    packets: BTreeMap<u16, Packet>,
+    payload_type: u8,
+    queue: VecDeque<u16>,
+    ssrc: u32,
+}
+
+impl RtxBucket {
+
+    pub fn add(&mut self, pkt: &Packet) {
+        let sn = pkt.header.sequence_number;
+        if self.packets.len() >= self.capacity {
+            if let Some(old_sn) = self.queue.pop_front() {
+                self.packets.remove(&old_sn);
+            }
+        }
+        let rtx = self.rtp_to_rtx(pkt);
+        self.packets.insert(sn, rtx);
+        self.queue.push_back(sn);
+    }
+
+    pub fn contains(&self, sn: u16) -> bool {
+        self.packets.contains_key(&sn)
+    }
+
+    pub fn get(&self, sn: u16) -> Option<Packet> {
+        self.packets.get(&sn).cloned()
+    }
+
+    pub fn new(capacity: usize, ssrc: u32, payload_type: u8) -> Self {
+        assert!(capacity > 0, "Bucket capacity must be higher than 0");
+        Self {
+            capacity,
+            packets: BTreeMap::new(),
+            payload_type,
+            queue: VecDeque::with_capacity(capacity),
+            ssrc,
+        }
+    }
+
+    fn rtp_to_rtx(&self, source: &Packet) -> Packet {
+        let mut header = source.header.clone();
+        header.ssrc = self.ssrc;
+        header.payload_type = self.payload_type;
+    
+        let source_sn = header.sequence_number;
+        let mut payload = BytesMut::with_capacity(source.payload.len() + 2);
+        payload.extend_from_slice(&source_sn.to_be_bytes());
+        payload.extend_from_slice(&source.payload[..]);
+        Packet { header, payload: payload.freeze() }
+    }
+}
+
 
 
 #[cfg(test)]

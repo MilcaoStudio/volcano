@@ -205,7 +205,7 @@ impl LocalRouter {
             //let factory_in = factory.clone();
             let rtcp_forwarder = factory.get_rtcp_buffer(dt_in.ssrc());
             Box::pin(async move {
-                let Some(transceiver) = &dt_in.transceiver else {
+                let Some(transceiver) = &*dt_in.transceiver.read().await else {
                     warn!("Expected transceiver for downtrack {}", dt_in.id());
                     return;
                 };
@@ -490,7 +490,8 @@ impl LocalRouter {
         {
             // Bind RTP
             buffer.bind(&rtp_receiver.get_parameters().await, PacketOptions {
-                max_bitrate: self.config.max_bandwidth
+                max_bitrate: self.config.max_bandwidth,
+                rtx_enabled: self.config.with_rtx,
             }).await;
             
             layer.run_ingestion(rtp_receiver);
@@ -509,7 +510,7 @@ impl LocalRouter {
         let recv_kind = rv.kind();
         let stream_id = track.stream_id();
         let audio_observer = self.audio_observer.clone();
-        rv.register_on_close(Box::new(move || {
+        rv.on_close(Box::new(move || {
             let stream_id_in = stream_id.clone();
             let observer_in = audio_observer.clone();
             Box::pin(async move {

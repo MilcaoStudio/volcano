@@ -506,8 +506,8 @@ impl Consumer for Subscriber {
             )
             .await?;
         // New local track
-        let mut down_track = DownTrack::new_track_local(self.id(), local_track);
-        down_track.set_transceiver(transceiver.clone());
+        let down_track = DownTrack::new_track_local(self.id(), local_track);
+        down_track.set_transceiver(transceiver.clone()).await;
         let down_track_arc = Arc::new(down_track);
         Ok(down_track_arc)
     }
@@ -523,7 +523,7 @@ impl Consumer for Subscriber {
         };
         let stream_id = down_track.stream_id();
 
-        let sender = match &down_track.transceiver {
+        let sender = match &*down_track.transceiver.read().await {
             Some(t) => t.sender().await,
             None => {
                 warn!("DownTrack {} has no transceiver", track_id);

@@ -49,6 +49,8 @@ pub enum Error {
     FullSpatialLayer(u8),
     // #[error("webrtc error error")]
     // ErrWebRTCError(WebRTCErrorError),
+    #[error("this track does not contain RTX encoding")]
+    ErrNonRTXEncoding,
 }
 impl Error {
     pub fn equal(&self, err: &anyhow::Error) -> bool {

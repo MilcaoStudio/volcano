@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::{watch, Mutex, RwLock};
@@ -16,14 +16,13 @@ use webrtc::rtcp::packet::Packet as RtcpPacket;
 
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
-use webrtc::rtp::packet::Packet as RTP;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecParameters, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::track::track_remote::TrackRemote;
-use webrtc::util::Unmarshal;
 
 use crate::packet::rtcp::RTCPForwarder;
 use crate::packet::{AtomicBuffer, BufferIO, VP8};
+use crate::track::sequencer::AtomicSequencer;
 
 use super::downtrack::{DownTrack, DownTrackType};
 use super::error::{Error, Result};
@@ -269,14 +268,13 @@ pub trait Receiver: Send + Sync {
         pkts: Vec<Box<dyn RtcpPacket + Send + Sync>>,
         last_ssrc: u32,
         ssrc: u32,
+        sequencer: Arc<AtomicSequencer>,
     );
 
-    /// Retransmits all given packets into a given [DownTrack].
+    /// Retransmits all given packets into all available downtracks. Selected layer is provided by packets' layer.
     /// # Arguments
-    /// - `track`: [DownTrack] used to retransmit packets.
     /// - `packets`: Packets to retransmit.
-    async fn retransmit_packets(&self, track: Arc<DownTrack>, packets: &[PacketMeta])
-    -> Result<()>;
+    async fn retransmit_packets(&self, packets: &[PacketMeta]);
 
     /// Deletes and closes a [DownTrack] from a given layer.
     /// # Arguments
@@ -285,7 +283,7 @@ pub trait Receiver: Send + Sync {
     async fn delete_down_track(&self, layer: usize, id: &str) -> Result<()>;
 
     /// Registers a function to be called when the receiver is closed.
-    async fn register_on_close(&self, f: OnCloseHandlerFn);
+    async fn on_close(&self, f: OnCloseHandlerFn);
 
     /// Sends RTCP packets back to the uptracks
     /// # Arguments
@@ -593,11 +591,12 @@ impl Receiver for WebRTCReceiver {
         pkts: Vec<Box<dyn RtcpPacket + Send + Sync>>,
         last_ssrc: u32,
         ssrc: u32,
+        sequencer: Arc<AtomicSequencer>,
     ) {
         use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
         //use webrtc::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
         use webrtc::rtcp::receiver_report::ReceiverReport;
-        //use webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
+        use webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack;
 
         let mut fwd_pkts: Vec<Box<dyn RtcpPacket + Send + Sync>> = Vec::new();
 
@@ -639,16 +638,16 @@ impl Receiver for WebRTCReceiver {
                         max_rate_packet_loss = r.fraction_lost;
                     }
                 }
-            /* webrtc-rs should respond to incoming NACK 
+        
             } else if let Some(layer_nack) =
                 pkt.as_any().downcast_ref::<TransportLayerNack>()
             {
-                let mut nack = layer_nack.clone();
-                nack.media_ssrc = last_ssrc;
-                nack.sender_ssrc = ssrc;
-                
-                fwd_pkts.push(Box::new(nack));
-                */
+                let mut lost_pkts = Vec::default();
+                for pair in &layer_nack.nacks {
+                    let mut metas = sequencer.get_seq_no_pairs(&pair.packet_list()).await;
+                    lost_pkts.append(&mut metas);
+                }
+                self.retransmit_packets(&lost_pkts).await;
             } else if let Some(layer_cc) = pkt.as_any().downcast_ref::<TransportLayerCc>() {
                 let mut cc = layer_cc.clone();
                 cc.media_ssrc = last_ssrc;
@@ -716,7 +715,7 @@ impl Receiver for WebRTCReceiver {
         Ok(())
     }
 
-    async fn register_on_close(&self, f: OnCloseHandlerFn) {
+    async fn on_close(&self, f: OnCloseHandlerFn) {
         let mut handler = self.on_close_handler.lock().await;
         *handler = Some(f);
     }
@@ -744,38 +743,31 @@ impl Receiver for WebRTCReceiver {
 
     async fn retransmit_packets(
         &self,
-        track: Arc<DownTrack>,
         packets: &[PacketMeta],
-    ) -> Result<()> {
+    ) {
         for packet in packets {
             if let Some(layer) = &self.layer(packet.layer as usize).await {
-                let mut data = vec![0_u8; u16::MAX.into()];
-
-                if let Ok(size) = layer
-                    .rtp_reader
-                    .get_packet(&mut data[..], packet.source_seq_no)
-                    .await
-                {
-                    let mut raw_pkt = Bytes::copy_from_slice(&data[..size]);
-                    let pkt = RTP::unmarshal(&mut raw_pkt);
-                    match pkt {
-                        Ok(mut p) => {
-                            p.header.sequence_number = packet.target_seq_no;
-                            p.header.timestamp = packet.timestamp;
-                            p.header.ssrc = track.ssrc();
-                            p.header.payload_type = track.payload_type();
-
-                            let mut payload = BytesMut::new();
-                            payload.extend_from_slice(&p.payload.slice(..));
-
+                match layer.rtp_reader.get_packet(packet.source_seq_no).await {
+                    Ok(rtx) => {
+                        for track in layer.down_tracks.lock().await.deref() {
+                            let Some(rtx_encoding) = track.rtx_encoding().await else {
+                                continue;
+                            };
+                            let mut rtx = rtx.clone();
+                            rtx.header.sequence_number = rtx_encoding.sequencer.next_sn();
+                            rtx.header.timestamp = packet.timestamp;
+                            rtx.header.ssrc = rtx_encoding.ssrc;
                             if track.simulcast.lock().await.temporal_supported {
                                 let mime = track.mime().await;
                                 if mime.as_str() == "video/vp8" {
                                     let mut vp8 = VP8::default();
-                                    if vp8.unmarshal(&p.payload).is_err() {
+                                    if vp8.unmarshal(&rtx.payload).is_err() {
                                         continue;
                                     }
                                     let (tlz0_id, pic_id) = packet.get_vp8_payload_meta();
+    
+                                    let mut payload = BytesMut::new();
+                                    payload.extend_from_slice(&rtx.payload[..]);
                                     modify_vp8_temporal_payload(
                                         &mut payload,
                                         vp8.picture_id_idx as usize,
@@ -786,17 +778,20 @@ impl Receiver for WebRTCReceiver {
                                     )
                                 }
                             }
-
-                            if track.write_raw_rtp(p).await.is_ok() {
+                            
+                            let size = rtx.payload.len();
+                            trace!("Retransmit rtx packet {rtx:?}");
+                            if track.write_raw_rtp(rtx).await.is_ok() {
                                 track.update_stats(size as u32);
                             }
                         }
-                        Err(err) => {
-                            warn!("Invalid RTC packet: {err}. Skipped.");
-                            continue;
-                        }
-                    }
+                    },
+                    Err(err) => {
+                        warn!("get_packet failed: {err}");
+                        continue;
+                    } 
                 }
+
             } else {
                 warn!(
                     "No buffer found for layer {}. Retransmition skipped.",
@@ -805,8 +800,6 @@ impl Receiver for WebRTCReceiver {
                 break;
             }
         }
-
-        Ok(())
     }
     fn as_any(&self) -> &(dyn Any + Send + Sync) {
         self

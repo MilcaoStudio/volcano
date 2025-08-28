@@ -8,7 +8,6 @@ pub mod rtcp;
 pub use error::BufferError;
 use error::Result;
 
-use bucket::Bucket;
 use nack::NackQueue;
 use tokio::time::Instant;
 use webrtc::rtp::extension::transport_cc_extension::TransportCcExtension;
@@ -29,6 +28,8 @@ use webrtc::util::Unmarshal;
 use rtp::rtp_codec::{RTCRtpParameters, RTPCodecType};
 use webrtc::rtcp::packet::Packet as RtcpPacket;
 use webrtc::rtp_transceiver as rtp;
+
+use crate::packet::bucket::RtxBucket;
 
 const INITIAL_PACKET_PROBE_COUNT: u8 = 25;
 const MAX_SEQUENCE_NUMBER: u32 = 1 << 16;
@@ -107,10 +108,11 @@ pub struct Stats {
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub struct Options {
     pub max_bitrate: u64,
+    pub rtx_enabled: bool,
 }
 
 pub struct Buffer {
-    bucket: Option<Bucket>,
+    //bucket: Option<RtxBucket>,
     nacker: Option<NackQueue>,
 
     codec_type: RTPCodecType,
@@ -119,7 +121,7 @@ pub struct Buffer {
     max_bitrate: u64,
     /// Instant when the last packet was reported.
     last_report: Option<Instant>,
-    closed: bool,
+    //closed: bool,
     mime: String,
 
     // supported feedbacks
@@ -158,7 +160,7 @@ pub struct Buffer {
     last_arrival: Option<Instant>,
 
     video_pool_len: usize,
-    audio_pool_len: usize,
+    //audio_pool_len: usize,
 }
 
 impl Buffer {
@@ -166,8 +168,8 @@ impl Buffer {
         Self {
             media_ssrc: ssrc,
             video_pool_len: 1500 * 500,
-            audio_pool_len: 1500 * 25,
-            bucket: Default::default(),
+            //audio_pool_len: 1500 * 25,
+            //bucket: Default::default(),
             nacker: Default::default(),
             codec_type: Default::default(),
             //pending_packets: Default::default(),
@@ -177,7 +179,7 @@ impl Buffer {
             //twcc_ext: Default::default(),
             //audio_ext: Default::default(),
             //bound: Default::default(),
-            closed: Default::default(),
+            //closed: Default::default(),
             mime: Default::default(),
             remb: Default::default(),
             nack: Default::default(),
@@ -217,17 +219,11 @@ impl Buffer {
         let sn = packet.header.sequence_number;
         self.calculate_nack(sn, now);
 
-        let pkt = &packet.payload;
-        let max_seq_no = self.max_seq_no;
-        if let Some(bucket) = self.bucket.as_mut() {
-            if let Err(err) = bucket.add_packet(pkt, sn, sn == max_seq_no) {
-                warn!("Packet #{sn} content not added: {err}");
-            }
-        }
+        let payload = &packet.payload;
 
         // Better safe (wrapping) than sorry (overflow)
-        self.stats.total_byte = self.stats.total_byte.wrapping_add(pkt.len() as u64);
-        self.bitrate_helper = self.bitrate_helper.wrapping_add(pkt.len() as u64);
+        self.stats.total_byte = self.stats.total_byte.wrapping_add(payload.len() as u64);
+        self.bitrate_helper = self.bitrate_helper.wrapping_add(payload.len() as u64);
         self.stats.packet_count = self.stats.packet_count.wrapping_add(1);
 
         self.last_arrival = Some(now);
@@ -443,6 +439,7 @@ pub struct AtomicBuffer {
     audio_level: AtomicBool,
     bound: AtomicBool,
     buffer: Arc<Mutex<Buffer>>,
+    rtx_bucket: Arc<Mutex<Option<RtxBucket>>>,
     close_tx: broadcast::Sender<()>,
     forwarding: AtomicBool,
     on_transport_wide_cc_handler: Arc<Mutex<Option<OnTransportWideCCFn>>>,
@@ -474,6 +471,14 @@ impl BufferIO for AtomicBuffer {
         {
             let mut buffer = self.buffer.lock().await;
             if self.forwarding.load(Ordering::Acquire) {
+                if let Some(bucket) = self.rtx_bucket.lock().await.as_mut() {
+                    let sn = pkt.header.sequence_number;
+                    if bucket.contains(sn) {
+                        warn!("[RTP {}] Packet #{sn} already exists", buffer.media_ssrc);
+                    } else {
+                        bucket.add(&pkt);
+                    }
+                }
                 let ext_packet = buffer.process_rtp_packet(pkt.clone(), arrival_instant, arrival_time);
                 if let Err(err) = self.packet_tx.send(ext_packet) {
                     warn!("write -> Send packet failed: {err}");
@@ -551,7 +556,7 @@ impl BufferIO for AtomicBuffer {
 }
 
 impl AtomicBuffer {
-    pub fn new(ssrc: u32) -> Self {
+    pub fn new(media_ssrc: u32) -> Self {
         let (close_tx, _) = broadcast::channel::<()>(1);
         let (packet_tx, _) = broadcast::channel::<ExtPacket>(30);
         //let (pkt_s, pkt_r) = unbounded_channel::<ExtPacket>();
@@ -559,7 +564,8 @@ impl AtomicBuffer {
             audio_ext: Default::default(),
             audio_level: Default::default(),
             bound: Default::default(),
-            buffer: Arc::new(Mutex::new(Buffer::new(ssrc))),
+            buffer: Arc::new(Mutex::new(Buffer::new(media_ssrc))),
+            rtx_bucket: Default::default(),
             pending_packets: Default::default(),
             close_tx,
             forwarding: Default::default(),
@@ -585,10 +591,13 @@ impl AtomicBuffer {
 
         if buffer.mime.starts_with("audio/") {
             buffer.codec_type = RTPCodecType::Audio;
-            buffer.bucket = Some(Bucket::new(buffer.audio_pool_len));
         } else if buffer.mime.starts_with("video/") {
             buffer.codec_type = RTPCodecType::Video;
-            buffer.bucket = Some(Bucket::new(buffer.video_pool_len));
+            if o.rtx_enabled {
+                let pt = to_rtx_payload_type(codec.payload_type);
+                let mut bucket = self.rtx_bucket.lock().await;
+                *bucket = Some(RtxBucket::new(buffer.video_pool_len, buffer.media_ssrc + 1_000, pt));
+            }
         } else {
             buffer.codec_type = RTPCodecType::Unspecified;
         }
@@ -648,18 +657,11 @@ impl AtomicBuffer {
         self.buffer.lock().await.bitrate
     }
 
-    pub async fn get_packet(&self, buff: &mut [u8], sn: u16) -> Result<usize> {
-        let buffer = self.buffer.lock().await;
+    pub async fn get_packet(&self, sn: u16) -> Result<Packet> {
+        let bucket = self.rtx_bucket.lock().await;
 
-        if buffer.closed {
-            return Err(BufferError::ErrIOEof);
-        }
-
-        if let Some(bucket) = &buffer.bucket {
-            return bucket.get_packet(buff, sn);
-        }
-
-        Ok(0)
+        bucket.as_ref().and_then(|bucket| bucket.get(sn))
+            .ok_or(BufferError::ErrPacketNotFound)
     }
 
     pub async fn get_sender_report_data(&self) -> (u32, u64, i64) {
@@ -876,4 +878,8 @@ fn is_later_timestamp(timestamp1: u32, timestamp2: u32) -> bool {
         return true;
     }
     false
+}
+
+pub fn to_rtx_payload_type(payload_type: u8) -> u8 {
+    payload_type + 1
 }

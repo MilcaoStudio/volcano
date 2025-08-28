@@ -28,7 +28,7 @@ pub async fn create_subscriber_connection(cfg: &Arc<WebRTCTransportConfig>) -> R
     let mut m = MediaEngine::default();
     m.register_default_codecs()?;
     
-    if cfg.rtx_enabled {
+    if cfg.router.with_rtx {
         register_rtx_codecs(&mut m);
     }
     
@@ -89,7 +89,7 @@ pub async fn create_central_connection(cfg: Arc<WebRTCTransportConfig>) -> Resul
     let mut m = MediaEngine::default();
     m.register_default_codecs()?;
 
-    if cfg.rtx_enabled {
+    if cfg.router.with_rtx {
         register_rtx_codecs(&mut m);
     }
     

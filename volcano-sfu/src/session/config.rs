@@ -69,7 +69,6 @@ pub struct WebRTCTransportConfig {
     pub ice_servers: Vec<RTCIceServer>,
     pub setting: SettingEngine,
     pub router: RouterConfig,
-    pub rtx_enabled: bool,
     pub factory: Arc<AtomicFactory>,
     pub port_map: PortMap,
 }
@@ -96,7 +95,6 @@ pub struct WebRTCConfig {
     pub sdp_semantics: String,
     #[serde(rename = "mdns")]
     mdns: bool,
-    rtx: bool,
     timeouts: WebRTCTimeoutsConfig,
 }
 
@@ -121,6 +119,8 @@ pub struct RouterConfig {
     #[serde(rename = "audiolevelfilter")]
     pub audio_level_filter: i32,
     pub simulcast: SimulcastConfig,
+    #[serde(rename = "rtx")]
+    pub with_rtx: bool,
 }
 
 #[cfg(not(feature = "turn"))]
@@ -252,7 +252,7 @@ impl WebRTCTransportConfig {
 
         se.set_network_types(network_types);
 
-        se.enable_sender_rtx(c.webrtc.rtx);
+        se.enable_sender_rtx(c.router.with_rtx);
 
         WebRTCTransportConfig {
             configuration: RTCConfiguration {
@@ -266,7 +266,6 @@ impl WebRTCTransportConfig {
             ice_servers,
             setting: se,
             router: c.router.clone(),
-            rtx_enabled: c.webrtc.rtx,
             factory: Arc::default(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             port_map,

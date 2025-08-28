@@ -71,7 +71,7 @@ pub struct DownTrackInternal {
     stream_id: String,
     max_sn: u16,
     payload_type: AtomicU8,
-    sequencer: Arc<RwLock<AtomicSequencer>>,
+    sequencer: Arc<RwLock<Arc<AtomicSequencer>>>,
     buffer_factory: Arc<AtomicFactory>,
     /// Whether the track is enabled (unmuted).
     enabled: Arc<AtomicBool>,
@@ -79,7 +79,7 @@ pub struct DownTrackInternal {
     re_sync: Arc<AtomicBool>,
     last_ssrc: Arc<AtomicU32>,
     /// Codec capability of the track.
-    codec: RTCRtpCodecCapability,
+    media_codec: RTCRtpCodecCapability,
     /// Receiver of the track.
     receiver: Weak<WebRTCReceiver>,
     write_stream: RwLock<Option<Arc<dyn TrackLocalWriter + Send + Sync>>>,
@@ -89,7 +89,7 @@ pub struct DownTrackInternal {
 impl DownTrackInternal {
     pub(crate) fn new(c: RTCRtpCodecCapability, r: &Arc<WebRTCReceiver>, max_track: u16, factory: Arc<AtomicFactory>) -> Self {
         Self {
-            codec: c,
+            media_codec: c,
             id: r.track_id(),
             rid: r.track_rid(),
             bound: AtomicBool::default(),
@@ -98,7 +98,7 @@ impl DownTrackInternal {
             stream_id: r.stream_id(),
             max_sn: max_track,
             payload_type: Default::default(),
-            sequencer: RwLock::new(AtomicSequencer::new(max_track)).into(),
+            sequencer: RwLock::new(Arc::new(AtomicSequencer::new(max_track))).into(),
             buffer_factory: factory,
             enabled: Default::default(),
             re_sync: Default::default(),
@@ -126,12 +126,11 @@ impl PartialEq for DownTrackInternal {
 impl TrackLocal for DownTrackInternal {
     async fn bind(&self, t: &TrackLocalContext) -> RTCResult<RTCRtpCodecParameters> {
         let parameters = RTCRtpCodecParameters {
-            capability: self.codec.clone(),
+            capability: self.media_codec.clone(),
             ..Default::default()
         };
 
         let codec = codec_parameters_fuzzy_search(parameters, t.codec_parameters())?;
-
         self.ssrc.store(t.ssrc(), Ordering::Release);
         self.payload_type.store(codec.payload_type, Ordering::Release);
         self.re_sync.store(true, Ordering::Release);
@@ -149,14 +148,14 @@ impl TrackLocal for DownTrackInternal {
 
         let rtcp = self.buffer_factory.get_or_new_rtcp_buffer(t.ssrc());
 
-        //let sequencer = self.sequencer.clone();
+        let sequencer = self.sequencer.clone();
         let receiver = self.receiver.clone();
         let enabled_out = self.enabled.clone();
         let last_ssrc_out = self.last_ssrc.clone();
         let ssrc_out = self.ssrc.clone();
 
         rtcp.set_on_packets(Box::new(move |pkts| {
-            //let sqncr_in = sequencer.clone();
+            let sqncr_in = sequencer.clone();
             let rcvr_in = receiver.clone();
             let enabled = enabled_out.clone();
             let last_ssrc_in = last_ssrc_out.clone();
@@ -164,10 +163,10 @@ impl TrackLocal for DownTrackInternal {
             Box::pin(async move {
                 if let Some(receiver) = rcvr_in.upgrade() {
                     if enabled.load(Ordering::Acquire) {
-                        //let sequencer = sqncr_in.read().await;
+                        let sequencer = sqncr_in.read().await;
                         let last_ssrc = last_ssrc_in.load(Ordering::Acquire);
                         let ssrc = ssrc_in.load(Ordering::Acquire);
-                        receiver.send_feedback_rtcp(pkts, last_ssrc, ssrc,).await;
+                        receiver.send_feedback_rtcp(pkts, last_ssrc, ssrc, sequencer.clone()).await;
                     } else {
                         trace!("[Track {}] Cannot send RTCP because track is muted.", receiver.track_id())
                     }
@@ -178,9 +177,9 @@ impl TrackLocal for DownTrackInternal {
         }))
         .await;
 
-        if self.codec.mime_type.starts_with("video/") {
+        if self.media_codec.mime_type.starts_with("video/") {
             let mut sequencer = self.sequencer.write().await;
-            *sequencer = AtomicSequencer::new(self.max_sn);
+            *sequencer = AtomicSequencer::new(self.max_sn).into();
         }
 
         self.bound.store(true, Ordering::Relaxed);
@@ -207,11 +206,11 @@ impl TrackLocal for DownTrackInternal {
     }
 
     fn kind(&self) -> RTPCodecType {
-        if self.codec.mime_type.starts_with("audio/") {
+        if self.media_codec.mime_type.starts_with("audio/") {
             return RTPCodecType::Audio;
         }
 
-        if self.codec.mime_type.starts_with("video/") {
+        if self.media_codec.mime_type.starts_with("video/") {
             return RTPCodecType::Video;
         }
 
@@ -226,6 +225,21 @@ impl TrackLocal for DownTrackInternal {
         self
     }
 }
+
+pub struct RtxEncoding {
+    pub ssrc: u32,
+    pub sequencer: AtomicSequencer, 
+}
+
+impl RtxEncoding {
+    pub fn new(ssrc: u32, max_sn: u16) -> Self {
+        Self {
+            ssrc,
+            sequencer: AtomicSequencer::new(max_sn),
+        }
+    }
+}
+
 pub struct DownTrack {
     /// Canonical name defined by RFC 3550 6.5.1
     cname: String,
@@ -273,7 +287,7 @@ pub struct DownTrack {
     /// Maximum temporal layer of the track.
     pub max_temporal_layer: AtomicU32,
     /// RTCP transceiver of the track.
-    pub transceiver: Option<Arc<RTCRtpTransceiver>>,
+    pub transceiver: RwLock<Option<Arc<RTCRtpTransceiver>>>,
     on_close_handler: Arc<Mutex<Option<OnCloseFn>>>,
 
     octet_count: AtomicU32,
@@ -281,6 +295,8 @@ pub struct DownTrack {
     packet_sent_count: AtomicU32,
     last_stats: Mutex<Instant>,
     down_track_local: Arc<DownTrackInternal>,
+
+    rtx: Arc<RwLock<Option<Arc<RtxEncoding>>>>,
 }
 
 impl DownTrack {
@@ -306,7 +322,7 @@ impl DownTrack {
             simulcast: Arc::new(Mutex::new(SimulcastTrackHelpers::new())),
             max_spatial_layer: AtomicU8::default(),
             max_temporal_layer: AtomicU32::default(),
-            transceiver: Option::default(),
+            transceiver: Default::default(),
             on_close_handler: Arc::default(),
             //close_once: Once::new(),
             octet_count: AtomicU32::default(),
@@ -315,6 +331,7 @@ impl DownTrack {
             down_track_local: Arc::new(DownTrackInternal::new(c, r, max_track, factory)),
             packet_sent_count: AtomicU32::default(),
             last_stats: Instant::now().into(),
+            rtx: Default::default(),
         }
     }
 
@@ -407,7 +424,7 @@ impl DownTrack {
             max_spatial_layer: AtomicU8::default(),
             max_temporal_layer: AtomicU32::default(),
 
-            transceiver: None,
+            transceiver: Default::default(),
             on_close_handler: Arc::default(),
             //close_once: Once::new(),
             octet_count: AtomicU32::default(),
@@ -416,6 +433,7 @@ impl DownTrack {
             down_track_local: track,
             packet_sent_count: AtomicU32::default(),
             last_stats: Instant::now().into(),
+            rtx: Default::default(),
         }
     }
 
@@ -484,8 +502,12 @@ impl DownTrack {
     }
 
     /// Sets the transceiver of the track.
-    pub fn set_transceiver(&mut self, transceiver: Arc<RTCRtpTransceiver>) {
-        self.transceiver = Some(transceiver)
+    pub async fn set_transceiver(&self, transceiver: Arc<RTCRtpTransceiver>) {
+        let rtx = transceiver.sender().await.get_parameters().await.encodings.iter().find_map(|e| {
+            if e.rtx.ssrc > 0 { Some(Arc::new(RtxEncoding::new(e.rtx.ssrc, 1_000))) } else { None }
+        });
+        *self.transceiver.write().await = Some(transceiver);
+        *self.rtx.write().await = rtx;
     }
 
     /// SSRC of the track.
@@ -880,6 +902,10 @@ impl DownTrack {
         }
 
         Ok(())
+    }
+
+    pub async fn rtx_encoding(&self) -> Option<Arc<RtxEncoding>> {
+        self.rtx.read().await.clone()
     }
 }
 

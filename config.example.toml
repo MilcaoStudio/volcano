@@ -19,6 +19,8 @@ audiolevelinterval=500
 # Values from [0-100]
 audiolevelfilter = 50
 withstats = false
+# Enable RTX codecs for RTP retransmition
+rtx = true
 
 [router.simulcast]
 # Prefer best quality initially
@@ -43,8 +45,6 @@ sdpsemantics = "unified-plan"
 # toggle multicast dns support: https://tools.ietf.org/html/draft-mdns-ice-candidates-00
 mdns = false
 
-# Enable RTX codecs for RTP retransmition
-rtx = true
 
 # if sfu behind nat, set iceserver
 [[webrtc.iceservers]]
